@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- AirCast icon: a stylized cast/screen symbol -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,30 C40.745,30 30,40.745 30,54 C30,55.95 30.235,57.845 30.677,59.66 L35.85,59.66 C35.31,58.22 35,56.645 35,55 C35,43.954 43.954,35 55,35 L55,30 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,22 C36.327,22 22,36.327 22,54 C22,56.615 22.33,59.15 22.955,61.565 L28.35,61.565 C27.665,59.18 27.3,56.63 27.3,54 C27.3,39.254 39.254,27.3 54,27.3 L54,22 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M66,40 L42,40 C39.79,40 38,41.79 38,44 L38,55 L42,55 L42,44 L66,44 L66,68 L55,68 L55,72 L66,72 C68.21,72 70,70.21 70,68 L70,44 C70,41.79 68.21,40 66,40 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M45,55 C42.24,55 40,57.24 40,60 L40,76 C40,78.76 42.24,81 45,81 L65,81 C67.76,81 70,78.76 70,76 L70,60 C70,57.24 67.76,55 65,55 L45,55 Z M45,60 L65,60 L65,76 L45,76 L45,60 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M35,64 C30.582,64 27,67.582 27,72 L27,80 C27,82.21 28.79,84 31,84 L41,84 C43.21,84 45,82.21 45,80 L45,72 C45,67.582 41.418,64 37,64 L35,64 Z M35,68 L37,68 C39.21,68 41,69.79 41,72 L41,80 L31,80 L31,72 C31,69.79 32.79,68 35,68 Z" />
+</vector>

@@ -1,0 +1,56 @@
+<resources>
+    <string name="app_name">Atarayo-Cast</string>
+    <string name="service_name">Atarayo-Cast 投屏服务</string>
+    <string name="service_running">Atarayo-Cast 正在运行</string>
+    <string name="service_idle">Atarayo-Cast 已就绪</string>
+    <string name="service_streaming">正在投屏中…</string>
+    <string name="channel_name">Atarayo-Cast 服务</string>
+    <string name="channel_desc">投屏服务运行通知</string>
+
+    <!-- Main UI -->
+    <string name="status_idle">未连接</string>
+    <string name="status_waiting">等待连接…</string>
+    <string name="status_connected">已连接</string>
+    <string name="status_streaming">投屏中</string>
+
+    <string name="btn_start">启动服务</string>
+    <string name="btn_stop">停止服务</string>
+    <string name="btn_settings">设置</string>
+
+    <string name="device_name_label">设备名称</string>
+    <string name="device_name_default">Atarayo-Cast-Android</string>
+
+    <!-- Fullscreen (Phase 3) -->
+    <string name="btn_fullscreen">全屏</string>
+    <string name="btn_exit_fullscreen">退出全屏</string>
+
+    <!-- Settings -->
+    <string name="settings_title">设置</string>
+    <string name="settings_resolution">分辨率</string>
+    <string name="settings_resolution_auto">自动 (自适应屏幕)</string>
+    <string name="settings_resolution_720p">720p</string>
+    <string name="settings_resolution_1080p">1080p</string>
+    <string name="settings_resolution_1080p60">1080p 60fps</string>
+    <string name="settings_resolution_4k">4K (HEVC)</string>
+    <string name="settings_adaptive_resolution">自适应分辨率</string>
+    <string name="settings_keep_screen_on">防息屏</string>
+    <string name="settings_keep_screen_on_desc">投屏时保持屏幕常亮</string>
+    <string name="settings_fullscreen_default">默认全屏</string>
+    <string name="settings_fullscreen_default_desc">服务启动后自动进入全屏</string>
+    <string name="settings_pin">PIN 认证</string>
+    <string name="settings_boot">开机自启</string>
+    <string name="settings_pip">画中画</string>
+    <string name="settings_debug">调试信息</string>
+    <string name="settings_h265">H.265/HEVC</string>
+    <string name="settings_h265_desc">启用 HEVC 编码支持 (4K 投屏)</string>
+
+    <!-- Debug -->
+    <string name="debug_fps">FPS: %1$d</string>
+    <string name="debug_bitrate">码率: %1$.1f Mbps</string>
+    <string name="debug_codec">编码: %1$s</string>
+    <string name="debug_resolution">分辨率: %1$dx%2$d</string>
+
+    <!-- PIN authentication -->
+    <string name="pin_notification_title">AirPlay PIN 认证</string>
+    <string name="pin_notification_text">在 Mac/iPhone 上输入 PIN: %1$s</string>
+</resources>
