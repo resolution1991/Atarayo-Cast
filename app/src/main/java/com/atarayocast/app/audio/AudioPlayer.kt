@@ -66,6 +66,11 @@ class AudioPlayer(
     // Pre-allocated decode output buffer to reduce GC pressure
     private var decodeBuffer: ByteArray = ByteArray(0)
 
+    // AirPlay volume gain (0.0-1.0), set from Mac's volume slider.
+    // This controls ONLY the AudioTrack's own gain — it does NOT touch
+    // the Android system media volume. Default is 1.0 (full volume).
+    @Volatile private var airplayGain = 1.0f
+
     /**
      * Called from onAudioFormat callback to configure audio output.
      * Re-initializes AudioTrack and decoder if format changes.
@@ -164,10 +169,14 @@ class AudioPlayer(
                 releaseAudioTrack()
                 return
             }
+            // Apply the current AirPlay volume gain before playback starts.
+            // If ducked by audio focus, apply the ducked gain.
+            val effectiveGain = if (focusDucked) airplayGain * 0.3f else airplayGain
+            track.setVolume(effectiveGain)
             requestAudioFocus()
             track.play()
             running = true
-            Log.i(TAG, "AudioTrack started: ${SAMPLE_RATE}Hz stereo 16-bit, buf=$bufferSize bytes, ct=$ct")
+            Log.i(TAG, "AudioTrack started: ${SAMPLE_RATE}Hz stereo 16-bit, buf=$bufferSize bytes, ct=$ct, gain=$effectiveGain")
         }
     }
 
@@ -320,6 +329,25 @@ class AudioPlayer(
         spf = 0
     }
 
+    /**
+     * Set the AirPlay audio volume gain (0.0-1.0).
+     * This controls ONLY the AudioTrack's own gain — it does NOT modify
+     * the Android system media volume. The system volume remains at
+     * whatever the user set on the device.
+     *
+     * Called from AirCastService.onVolumeChange() when Mac sends volume.
+     * The gain is stored so it can be re-applied when AudioTrack is recreated.
+     */
+    @Synchronized
+    fun setVolume(gain: Float) {
+        val clamped = gain.coerceIn(0.0f, 1.0f)
+        airplayGain = clamped
+        // If ducked by audio focus, apply duck multiplier
+        val effectiveGain = if (focusDucked) clamped * 0.3f else clamped
+        audioTrack?.setVolume(effectiveGain)
+        Log.i(TAG, "AirPlay volume gain set: $clamped (effective=$effectiveGain, ducked=$focusDucked)")
+    }
+
     /** Flush audio buffers (e.g., on connection reset). */
     @Synchronized
     fun flush() {
@@ -389,16 +417,15 @@ class AudioPlayer(
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                             Log.w(TAG, "Audio focus TRANSIENT LOSS — ducking")
                             focusDucked = true
-                            audioTrack?.let { t ->
-                                val halfVol = AudioTrack.getMaxVolume().times(0.3f)
-                                t.setVolume(halfVol)
-                            }
+                            // Duck: multiply AirPlay gain by 0.3
+                            audioTrack?.setVolume(airplayGain * 0.3f)
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
                             Log.i(TAG, "Audio focus GAIN — restoring")
                             if (focusDucked) {
                                 focusDucked = false
-                                audioTrack?.setVolume(1.0f)
+                                // Restore to the stored AirPlay gain
+                                audioTrack?.setVolume(airplayGain)
                             }
                         }
                     }

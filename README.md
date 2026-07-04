@@ -26,21 +26,38 @@ Android 设备作为 AirPlay 接收端和 DLNA Media Renderer，接收来自 mac
 
 ### 高级功能
 
+- **自动全屏** — 投屏连接成功后自动切换全屏模式，投屏结束时自动退出
+- **刷新画面** — 一键清除 Surface 画面，消除偶发压缩伪影
+- **断开连接** — 关闭按钮仅断开当前 AirPlay 连接，服务保持运行，可立即重连
 - **分辨率自适应** — 自动检测设备屏幕分辨率（上限 4K），也支持手动选择 9 种分辨率
 - **画中画 (PiP)** — 投屏中按 Home 键进入画中画模式
 - **防息屏** — WakeLock 保持 CPU 唤醒，FLAG_KEEP_SCREEN_ON 保持屏幕常亮
-- **全屏沉浸** — 隐藏系统栏，控制浮层 8 秒自动隐藏
+- **全屏沉浸** — 隐藏系统栏，控制浮层自动隐藏
 - **调试覆盖层** — 实时显示 FPS、码率、编码器、分辨率
+- **无投屏提示** — 未投屏时居中显示"当前无投屏输入"
 - **开机自启** — 支持 BootReceiver 开机自动启动服务
 - **通知栏控制** — 前台服务通知，含停止按钮，点击回到应用
 
-### 性能优化
+### 性能优化 (v0.2 新增)
 
-- **DirectByteBuffer 帧池** — 8 x 4MB 预分配缓冲池，零 per-frame 内存分配，消除 ~120MB/s GC 压力
+- **DirectByteBuffer 帧池** — 24 x 4MB 预分配缓冲区（v0.1: 8 个），零 per-frame 内存分配
 - **MediaCodec 异步回调** — 无轮询，codec 就绪时自动拉取帧
+- **IDR 关键帧保护** — Kotlin + C 双层保护，IDR 帧池满时 sem_timedwait 等待 15ms，非 IDR 帧立即丢弃
+- **首帧 IDR 数据保留** — 配置 codec 后首帧（SPS+PPS+IDR）同时喂入解码器，消除初始伪影
 - **NAL 零拷贝解析** — 使用偏移引用代替 ByteArray 复制
+- **色彩元数据** — KEY_COLOR_STANDARD=BT.709 / KEY_COLOR_RANGE=LIMITED / KEY_COLOR_TRANSFER=SDR_VIDEO
+- **解码器调度** — KEY_PRIORITY=0 (实时) / KEY_OPERATING_RATE=120 / KEY_FRAME_RATE=60
+- **自适应播放** — KEY_MAX_WIDTH/HEIGHT=3840x2160，分辨率切换无需重建 codec
 - **低延迟模式** — MediaCodec KEY_LOW_LATENCY (API 30+)
+- **解码线程优先级** — THREAD_PRIORITY_DISPLAY
+- **JNI 方法 ID 缓存** — ByteBuffer.clear/limit 方法 ID 在初始化时缓存，消除每帧 120+ 次冗余 JNI 调用
 - **UPnP 线程池** — CachedThreadPool，最大 50 并发连接
+
+### 音量控制 (v0.2 新增)
+
+- **AudioTrack 增益控制** — Mac 音量仅控制投屏音频增益（0.0-1.0 连续值），不修改系统音量
+- **dB→线性转换** — `10^(dB/20)` 标准音频增益映射
+- **音频焦点联动** — duck/restore 时保留 AirPlay 增益，不覆盖
 
 ---
 
@@ -86,42 +103,50 @@ Android 设备作为 AirPlay 接收端和 DLNA Media Renderer，接收来自 mac
 
 | 层级 | 文件 | 职责 |
 |------|------|------|
-| **UI** | `MainActivity.kt` | SurfaceView 渲染、全屏控制、PiP、调试覆盖层 |
+| **UI** | `MainActivity.kt` | SurfaceView 渲染、自动全屏、刷新、断开连接、PiP、调试覆盖层 |
 | **UI** | `SettingsActivity.kt` | 设备名、分辨率、H.265、PIN、画中画等设置 |
 | **服务** | `AirCastService.kt` | 前台服务，实现 `NativeCallbacks`，协调所有子系统 |
-| **视频** | `VideoDecoder.kt` | MediaCodec 异步解码 H.264/H.265，NAL 解析提取 CSD |
-| **音频** | `AudioPlayer.kt` | PCM 直写 / ALAC 软解 / AAC 硬解，音频焦点管理 |
-| **JNI** | `NativeBridge.kt` | JNI 声明 + DirectByteBuffer 帧池管理 |
+| **视频** | `VideoDecoder.kt` | MediaCodec 异步解码 H.264/H.265，IDR 保护，NAL 解析，色彩元数据 |
+| **音频** | `AudioPlayer.kt` | PCM 直写 / ALAC 软解 / AAC 硬解，AirPlay 增益控制，音频焦点管理 |
+| **JNI** | `NativeBridge.kt` | JNI 声明 + DirectByteBuffer 帧池管理 + restartHttpd |
 | **JNI** | `NativeCallbacks.kt` | 19 个 native → Kotlin 回调接口 |
 | **mDNS** | `AirPlayRegistrar.kt` | NsdManager 注册 RAOP/AirPlay 服务 |
 | **DLNA** | `DlnaManager.kt` | SSDP + SOAP/HTTP + ExoPlayer |
 | **DLNA** | `SsdServer.kt` | SSDP 多播发现 |
 | **DLNA** | `UpnpHttpServer.kt` | UPnP 设备描述 + SOAP 控制 + GENA 事件 |
-| **原生** | `native_bridge.cpp` | JNI 实现：RAOP 生命周期、帧池、ALAC 解码 |
-| **原生** | `android_raop_callbacks.c` | RAOP 回调 → JNI → Kotlin，帧池管理 |
+| **原生** | `native_bridge.cpp` | JNI 实现：RAOP 生命周期、帧池、ALAC 解码、HTTPD 重启 |
+| **原生** | `android_raop_callbacks.c` | RAOP 回调 → JNI → Kotlin，帧池管理，IDR 保护，JNI 方法缓存 |
 | **原生** | `android_dnssd_shim.c` | DNS-SD TXT 记录构建（适配 Android NsdManager） |
 
-### 视频管线
+### 视频管线 (v0.2 优化)
 
 ```
 macOS/iOS
-  │ AirPlay H.264/H.265 NAL stream
+  │ AirPlay H.264 NAL stream
   ▼
 UxPlay RAOP (C)
   │ _video_process callback
+  │ ↓ IDR 检测 (_is_idr_frame)
+  │ ↓ IDR: sem_timedwait(15ms)  非 IDR: sem_trywait(立即丢弃)
   ▼
-Frame Pool (sem_wait → memcpy → ByteBuffer)
-  │ DirectByteBuffer (zero-copy)
+Frame Pool (24 x 4MB DirectByteBuffer)
+  │ memcpy → ByteBuffer (JNI 方法 ID 已缓存)
   ▼
 NativeCallbacks.onVideoData() [Kotlin]
   │
   ▼
-VideoDecoder.feedFrame()
-  │ NAL parse → extract SPS/PPS/VPS → CSD
+VideoDecoder.handleFrame()
+  │ 首帧: configureCodec(CSD) → 喂入首帧 IDR 数据
+  │ 后续: IDR 检测 → 保护 IDR 不被丢弃
+  │      → BUFFER_FLAG_KEY_FRAME 标志
   ▼
-MediaCodec async callback
-  │ onInputBufferAvailable → feed pendingFrame
-  │ onOutputBufferAvailable → releaseOutputBuffer(true) → Surface
+MediaCodec async (THREAD_PRIORITY_DISPLAY)
+  │ KEY_PRIORITY=0, KEY_OPERATING_RATE=120
+  │ KEY_COLOR_STANDARD=BT.709, KEY_COLOR_RANGE=LIMITED
+  │ KEY_MAX_WIDTH=3840, KEY_MAX_HEIGHT=2160 (自适应)
+  │ KEY_LOW_LATENCY=1 (API 30+)
+  │ onInputBufferAvailable → feed pendingFrame (availableInputIndices 队列)
+  │ onOutputBufferAvailable → releaseOutputBuffer(0L) → Surface
   ▼
 SurfaceView (硬件渲染)
   │
@@ -144,6 +169,8 @@ NativeCallbacks.onAudioData(data, ct) [Kotlin]
   ├── ct=2 (ALAC)    → NativeBridge ALAC 软解码 → AudioTrack
   ├── ct=4 (AAC-LC)  → MediaCodec 硬解码 → AudioTrack
   └── ct=8 (AAC-ELD) → MediaCodec 硬解码 → AudioTrack
+                         ↑ AudioTrack.setVolume(airplayGain)
+                           Mac 音量 → dB → 10^(dB/20) → 0.0-1.0 增益
 ```
 
 ---
@@ -245,10 +272,16 @@ adb shell am start -n com.atarayocast.app/.MainActivity
 
 1. **启动服务** — 打开 Atarayo-Cast 应用，点击「启动服务」
 2. **AirPlay 投屏** — 在 macOS 控制中心选择 AirPlay，找到设备名称
-3. **DLNA 投屏** — 在支持 DLNA 的应用中选择设备名称
-4. **全屏模式** — 投屏时点击屏幕显示控制栏，点击全屏按钮
-5. **画中画** — 投屏中按 Home 键进入 PiP 模式
-6. **停止服务** — 点击通知栏的停止按钮或应用内的停止按钮
+3. **自动全屏** — 投屏连接成功后自动进入全屏模式
+4. **DLNA 投屏** — 在支持 DLNA 的应用中选择设备名称
+5. **全屏控制** — 投屏时点击屏幕显示控制栏
+   - **刷新** — 清除画面伪影
+   - **关闭** — 断开当前投屏（服务保持运行）
+   - **全屏** — 切换全屏/窗口模式
+   - **设置** — 进入设置页面
+6. **画中画** — 投屏中按 Home 键进入 PiP 模式
+7. **音量控制** — 在 Mac 上调整音量，仅影响投屏音频（不修改系统音量）
+8. **停止服务** — 点击通知栏的停止按钮
 
 ### 设置项
 
@@ -257,7 +290,7 @@ adb shell am start -n com.atarayocast.app/.MainActivity
 | 设备名称 | mDNS 广播的设备名 | Atarayo-Cast-Android |
 | 分辨率 | 投屏分辨率（自动 / 9种手动选项） | 自动 |
 | 自适应分辨率 | 自动检测屏幕原生分辨率 | 开启 |
-| H.265/HEVC | 启用 HEVC 编码支持（4K） | 关闭 |
+| H.265/HEVC | 启用 HEVC 编码支持（4K） | 开启 |
 | 防息屏 | 投屏时保持屏幕常亮 | 开启 |
 | 默认全屏 | 服务启动后自动进入全屏 | 关闭 |
 | PIN 认证 | 4 位 PIN 码认证 | 关闭 |
@@ -317,17 +350,17 @@ Atarayo-Cast/
 │       ├── cpp/                      # C/C++ 原生代码
 │       │   ├── CMakeLists.txt        # CMake 构建配置
 │       │   ├── native_bridge.cpp     # JNI 桥接实现
-│       │   ├── android_raop_callbacks.h   # RAOP 回调头文件
-│       │   ├── android_raop_callbacks.c   # RAOP 回调实现 + 帧池
+│       │   ├── android_raop_callbacks.h   # RAOP 回调头文件 (帧池 + JNI 缓存)
+│       │   ├── android_raop_callbacks.c   # RAOP 回调实现 + 帧池 + IDR 保护
 │       │   └── android_dnssd_shim.c  # DNS-SD 适配层
 │       ├── java/com/atarayocast/app/
 │       │   ├── AirCastApp.kt         # Application 类
-│       │   ├── MainActivity.kt       # 主界面
+│       │   ├── MainActivity.kt       # 主界面 (自动全屏 + 刷新 + 断开连接)
 │       │   ├── SettingsActivity.kt   # 设置界面
 │       │   ├── audio/
-│       │   │   └── AudioPlayer.kt    # 音频播放器
+│       │   │   └── AudioPlayer.kt    # 音频播放器 (AirPlay 增益控制)
 │       │   ├── bridge/
-│       │   │   ├── NativeBridge.kt   # JNI 桥接声明
+│       │   │   ├── NativeBridge.kt   # JNI 桥接声明 (含 restartHttpd)
 │       │   │   └── NativeCallbacks.kt # Native 回调接口
 │       │   ├── data/
 │       │   │   └── AppPrefs.kt       # DataStore 偏好存储
@@ -338,7 +371,7 @@ Atarayo-Cast/
 │       │   │   ├── UpnpHttpServer.kt # UPnP HTTP 服务器
 │       │   │   └── UpnpXmlBuilder.kt # UPnP XML 构建
 │       │   ├── service/
-│       │   │   ├── AirCastService.kt # 核心前台服务
+│       │   │   ├── AirCastService.kt # 核心前台服务 (含 disconnectClient)
 │       │   │   ├── AirPlayRegistrar.kt # mDNS 注册
 │       │   │   └── BootReceiver.kt   # 开机自启
 │       │   ├── ui/main/
@@ -346,7 +379,7 @@ Atarayo-Cast/
 │       │   ├── util/
 │       │   │   └── Constants.kt      # 常量 + 分辨率枚举
 │       │   └── video/
-│       │       └── VideoDecoder.kt   # MediaCodec 视频解码器
+│       │       └── VideoDecoder.kt   # MediaCodec 视频解码器 (IDR 保护 + 色彩元数据)
 │       └── res/
 │           ├── drawable/             # 图形资源
 │           ├── layout/               # 布局文件
@@ -359,6 +392,8 @@ Atarayo-Cast/
 │               ├── network_security_config.xml
 │               ├── backup_rules.xml
 │               └── data_extraction_rules.xml
+├── docs/
+│   └── video-optimization-plan.html # 视频优化方案文档
 ├── gradle/
 │   ├── libs.versions.toml            # 依赖版本目录
 │   └── wrapper/                      # Gradle Wrapper
@@ -397,23 +432,15 @@ Atarayo-Cast/
 
 ---
 
-## 许可证声明
+## 版本历史
 
-本项目使用并链接以下开源软件：
-
-- **UxPlay** — GPL-3.0 许可证
-- **OpenSSL** — Apache-2.0 许可证
-- **libplist** — LGPL-2.1 许可证
-- **Apple ALAC Decoder** — Apache-2.0 许可证
-- **llhttp** — MIT 许可证
-
-用户在使用和分发本项目时应遵守上述许可证的条款。
+| 版本 | 日期 | 说明 |
+|------|------|------|
+| v0.1 | 2026-07-04 | 基线版本：AirPlay + DLNA + 全部功能 |
+| v0.2 | 2026-07-04 | 视频优化 + 音量控制 + UI 增强 + Bug 修复 |
 
 ---
 
-## 测试设备
+## 许可证
 
-- **Lenovo YT-K606F** (Android 平板)
-  - 分辨率: 2160x1350 (16:10)
-  - 连接方式: ADB over Wi-Fi (192.168.31.212:45523)
-  - 端到端验证: macOS → AirPlay → 屏幕镜像成功
+本项目使用 GPL-3.0 许可证（因 UxPlay 依赖为 GPL-3.0）。

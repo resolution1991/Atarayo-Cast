@@ -11,11 +11,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <time.h>
 #include <android/log.h>
 #include "android_raop_callbacks.h"
 
 #define TAG "AirCastNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 /* TLS key to track whether we called AttachCurrentThread on this thread */
@@ -51,6 +53,39 @@ static JNIEnv *_get_env(android_callback_ctx_t *ctx) {
     return env;
 }
 
+/**
+ * Check if a frame contains an IDR NAL unit.
+ * H.264: NAL type 5 (IDR). H.265: NAL types 16-21 (BLA/IDR/CRA).
+ * Returns 1 if IDR, 0 otherwise.
+ */
+static int _is_idr_frame(const uint8_t *data, int len, int is_h265) {
+    int i = 0;
+    while (i < len - 3) {
+        if (data[i] == 0 && data[i+1] == 0) {
+            int nal_start = -1;
+            if (i + 3 < len && data[i+2] == 1) {
+                nal_start = i + 3;
+            } else if (i + 4 < len && data[i+2] == 0 && data[i+3] == 1) {
+                nal_start = i + 4;
+            }
+            if (nal_start >= 0 && nal_start < len) {
+                uint8_t first_byte = data[nal_start];
+                if (is_h265) {
+                    int nal_type = (first_byte >> 1) & 0x3F;
+                    if (nal_type >= 16 && nal_type <= 21) return 1;
+                } else {
+                    int nal_type = first_byte & 0x1F;
+                    if (nal_type == 5) return 1;
+                }
+            }
+            i += 2;
+        } else {
+            i++;
+        }
+    }
+    return 0;
+}
+
 /* --- Frame buffer pool --- */
 
 int android_frame_pool_init(android_callback_ctx_t *ctx, JNIEnv *env,
@@ -75,15 +110,12 @@ int android_frame_pool_init(android_callback_ctx_t *ctx, JNIEnv *env,
     return 0;
 }
 
-void android_frame_pool_return(android_callback_ctx_t *ctx, jobject buffer) {
-    if (!ctx->frame_pool_initialized) return;
+void android_frame_pool_return(android_callback_ctx_t *ctx, JNIEnv *env, jobject buffer) {
+    if (!ctx->frame_pool_initialized || !env || !buffer) return;
 
     /* Find which pool buffer this corresponds to */
     for (int i = 0; i < FRAME_POOL_SIZE; i++) {
         if (ctx->frame_buffers[i] == NULL) continue;
-
-        JNIEnv *env = _get_env(ctx);
-        if (!env) return;
 
         if ((*env)->IsSameObject(env, ctx->frame_buffers[i], buffer)) {
             pthread_mutex_lock(&ctx->frame_pool_lock);
@@ -111,14 +143,62 @@ void android_frame_pool_destroy(android_callback_ctx_t *ctx, JNIEnv *env) {
     LOGI("Frame buffer pool destroyed");
 }
 
-/* Pop a free buffer from the pool. Blocks on semaphore (indefinitely). */
+/**
+ * Pop a free buffer from the pool.
+ * NON-BLOCKING: uses sem_trywait. If the pool is full (all buffers in use by
+ * the Java decoder), returns -1 immediately. The caller MUST check for -1 and
+ * drop the frame.
+ *
+ * CRITICAL: This function MUST NOT block the calling thread (UxPlay RTP thread).
+ * Blocking causes RTP packet timeouts, which trigger RESET_TYPE_RTP_SHUTDOWN
+ * and disconnect the AirPlay session.
+ *
+ * For IDR frames: use _frame_pool_acquire_idr instead, which does a short
+ * timed wait to avoid dropping key frames (which cause macroblock artifacts).
+ */
 static int _frame_pool_acquire(android_callback_ctx_t *ctx) {
-    sem_wait(&ctx->frame_pool_sem);
+    if (sem_trywait(&ctx->frame_pool_sem) != 0) {
+        return -1;  /* pool full — drop frame */
+    }
 
     pthread_mutex_lock(&ctx->frame_pool_lock);
     int idx = ctx->frame_pool_free[--ctx->frame_pool_head];
     pthread_mutex_unlock(&ctx->frame_pool_lock);
 
+    return idx;
+}
+
+/**
+ * Acquire a free buffer from the pool, with a short timeout for IDR frames.
+ * If the pool is full, waits up to 15ms for a buffer to be returned.
+ * This prevents IDR key frames from being dropped (which causes artifacts).
+ * Returns -1 if timed out.
+ */
+static int _frame_pool_acquire_idr(android_callback_ctx_t *ctx) {
+    /* First try non-blocking */
+    if (sem_trywait(&ctx->frame_pool_sem) == 0) {
+        pthread_mutex_lock(&ctx->frame_pool_lock);
+        int idx = ctx->frame_pool_free[--ctx->frame_pool_head];
+        pthread_mutex_unlock(&ctx->frame_pool_lock);
+        return idx;
+    }
+
+    /* Pool full — wait up to 15ms for a buffer to be returned */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 15 * 1000 * 1000;  /* 15ms */
+    if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000;
+    }
+
+    if (sem_timedwait(&ctx->frame_pool_sem, &ts) != 0) {
+        return -1;  /* timed out — drop frame */
+    }
+
+    pthread_mutex_lock(&ctx->frame_pool_lock);
+    int idx = ctx->frame_pool_free[--ctx->frame_pool_head];
+    pthread_mutex_unlock(&ctx->frame_pool_lock);
     return idx;
 }
 
@@ -160,12 +240,37 @@ void android_callbacks_init(android_callback_ctx_t *ctx, JNIEnv *env, jobject ca
     ctx->on_audio_flush = (*env)->GetMethodID(env, cls, "onAudioFlush", "()V");
     ctx->on_video_flush = (*env)->GetMethodID(env, cls, "onVideoFlush", "()V");
     (*env)->DeleteLocalRef(env, cls);
+
+    /* Cache ByteBuffer method IDs to avoid per-frame JNI lookups.
+     * Previously _video_process() called GetMethodID for clear() and limit()
+     * on EVERY frame — that's 2 string lookups × 30fps = 60 lookups/sec,
+     * each requiring class resolution and method table scan.
+     * Now we cache the class and method IDs once at init. */
+    jclass bb_cls = (*env)->FindClass(env, "java/nio/ByteBuffer");
+    if (bb_cls) {
+        ctx->bytebuffer_class = (jclass)(*env)->NewGlobalRef(env, bb_cls);
+        ctx->bb_clear = (*env)->GetMethodID(env, bb_cls, "clear", "()Ljava/nio/Buffer;");
+        ctx->bb_limit = (*env)->GetMethodID(env, bb_cls, "limit", "(I)Ljava/nio/Buffer;");
+        ctx->bb_position = (*env)->GetMethodID(env, bb_cls, "position", "(I)Ljava/nio/Buffer;");
+        (*env)->DeleteLocalRef(env, bb_cls);
+        LOGI("ByteBuffer method IDs cached (clear/limit/position)");
+    } else {
+        ctx->bytebuffer_class = NULL;
+        ctx->bb_clear = NULL;
+        ctx->bb_limit = NULL;
+        ctx->bb_position = NULL;
+        LOGE("Failed to cache ByteBuffer method IDs!");
+    }
 }
 
 void android_callbacks_destroy(android_callback_ctx_t *ctx, JNIEnv *env) {
     if (ctx->callback_obj) {
         (*env)->DeleteGlobalRef(env, ctx->callback_obj);
         ctx->callback_obj = NULL;
+    }
+    if (ctx->bytebuffer_class) {
+        (*env)->DeleteGlobalRef(env, ctx->bytebuffer_class);
+        ctx->bytebuffer_class = NULL;
     }
     for (int i = 0; i < ctx->registered_count; i++) {
         free(ctx->registered_keys[i]);
@@ -202,6 +307,7 @@ static void _audio_process(void *cls, raop_ntp_t *ntp, audio_decode_struct *data
  * This eliminates per-frame JNI NewByteArray + SetByteArrayRegion overhead
  * and drastically reduces GC pressure (~120MB/s → 0MB/s allocation).
  */
+static int _vp_count = 0;
 static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
     if (!data->data || data->data_len <= 0) return;
@@ -209,29 +315,67 @@ static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data
         LOGE("Frame too large: %d bytes (max %d)", data->data_len, FRAME_BUFFER_SIZE);
         return;
     }
-    if (!ctx->frame_pool_initialized) return;
+    if (!ctx->frame_pool_initialized) {
+        LOGE("_video_process: frame pool not initialized!");
+        return;
+    }
 
     JNIEnv *env = _get_env(ctx);
     if (!env) return;
 
-    /* Acquire a free buffer from the pool (blocks until available) */
-    int buf_idx = _frame_pool_acquire(ctx);
+    _vp_count++;
+    if (_vp_count % 30 == 1) {
+        LOGI("_video_process: frame #%d size=%d is_h265=%d nal_count=%d",
+             _vp_count, data->data_len, data->is_h265, data->nal_count);
+    }
+
+    /* Check if this is an IDR (key) frame — never drop these */
+    int is_idr = _is_idr_frame(data->data, data->data_len, data->is_h265);
+
+    /* Acquire a free buffer from the pool.
+     * For IDR frames: use timed wait (15ms) to avoid dropping key frames,
+     *   which would cause macroblock artifacts on all subsequent P/B frames.
+     * For non-IDR frames: non-blocking, drop if pool full. */
+    int buf_idx;
+    if (is_idr) {
+        buf_idx = _frame_pool_acquire_idr(ctx);
+        if (buf_idx < 0) {
+            ctx->frame_pool_dropped++;
+            LOGW("_video_process: IDR frame dropped (pool full, timed out 15ms) dropped=%d",
+                 ctx->frame_pool_dropped);
+            return;
+        }
+    } else {
+        buf_idx = _frame_pool_acquire(ctx);
+        if (buf_idx < 0) {
+            ctx->frame_pool_dropped++;
+            if (ctx->frame_pool_dropped % 60 == 1) {
+                LOGW("_video_process: pool full, dropped=%d (Java decoder too slow)",
+                     ctx->frame_pool_dropped);
+            }
+            return;
+        }
+    }
 
     /* Copy frame data directly into the DirectByteBuffer's native memory */
     memcpy(ctx->frame_addrs[buf_idx], data->data, data->data_len);
 
-    /* Set the ByteBuffer's position and limit via JNI to reflect actual data size */
+    /* Set the ByteBuffer's position and limit via cached method IDs.
+     * Previously this did GetObjectClass + GetMethodID on every frame —
+     * now uses cached bb_clear / bb_limit from android_callbacks_init. */
     jobject buf = ctx->frame_buffers[buf_idx];
-    jclass bufClass = (*env)->GetObjectClass(env, buf);
-    jmethodID clearMethod = (*env)->GetMethodID(env, bufClass, "clear", "()Ljava/nio/Buffer;");
-    jmethodID limitMethod = (*env)->GetMethodID(env, bufClass, "limit", "(I)Ljava/nio/Buffer;");
-    (*env)->CallObjectMethod(env, buf, clearMethod);
-    (*env)->CallObjectMethod(env, buf, limitMethod, (jint)data->data_len);
-    (*env)->DeleteLocalRef(env, bufClass);
+    (*env)->CallObjectMethod(env, buf, ctx->bb_clear);
+    (*env)->CallObjectMethod(env, buf, ctx->bb_limit, (jint)data->data_len);
 
     /* Pass to Java */
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_video_data,
                            buf, (jlong)data->ntp_time_local, (jboolean)data->is_h265);
+
+    /* Check for Java exceptions — if onVideoData threw, clear it so subsequent calls work */
+    if ((*env)->ExceptionCheck(env)) {
+        LOGE("_video_process: Java exception in onVideoData callback!");
+        (*env)->ExceptionClear(env);
+    }
 }
 
 static void _conn_init(void *cls) {
@@ -409,8 +553,13 @@ static bool _check_register(void *cls, const char *pk_str) {
 
 static int _video_set_codec(void *cls, video_codec_t codec) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
-    LOGI("video_set_codec: %d (h265_enabled=%d)", codec, ctx->h265_enabled);
-    if (codec == VIDEO_CODEC_H265 && !ctx->h265_enabled) return -1;
+    LOGI("video_set_codec: codec=%d (0=unknown,1=H264,2=H265) h265_enabled=%d",
+         codec, ctx->h265_enabled);
+    if (codec == VIDEO_CODEC_H265 && !ctx->h265_enabled) {
+        LOGW("video_set_codec: H265 requested but h265_enabled=0, rejecting!");
+        return -1;
+    }
+    LOGI("video_set_codec: codec accepted");
     return 0;
 }
 

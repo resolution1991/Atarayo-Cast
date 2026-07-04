@@ -101,6 +101,23 @@ class AirCastService : Service(), NativeCallbacks {
             videoDecoder.setSurface(surface)
             dlnaManager.setSurface(surface)
         }
+        /**
+         * Disconnect the current AirPlay client but keep the service running.
+         * Restarts the RAOP HTTP server to sever the Mac's connection at the
+         * protocol level, then stops video/audio playback. mDNS stays registered.
+         */
+        fun disconnectClient() {
+            Log.i(TAG, "disconnectClient: restarting HTTPD + stopping playback")
+            // Restart RAOP HTTP server — this kicks the current client at the
+            // protocol level. The Mac will see the connection drop.
+            nativeBridge.restartHttpd(serverPort)
+            // Stop local playback
+            videoDecoder.stop()
+            audioPlayer.stop()
+            state = Constants.ConnectionState.WAITING
+            updateNotification(getString(R.string.status_waiting))
+            broadcastState()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -325,6 +342,7 @@ class AirCastService : Service(), NativeCallbacks {
             debugFps = ((frameCount * 1000) / elapsed).toInt()
             debugBitrate = (frameBytes * 8f) / (elapsed / 1000f) / 1_000_000f
             debugCodec = if (isH265) "H.265/HEVC" else "H.264/AVC"
+            Log.i(TAG, "Video stats: ${debugFps}fps ${String.format("%.1f", debugBitrate)}Mbps $debugCodec (frames=$frameCount)")
             frameCount = 0
             frameBytes = 0
             lastFpsReset = now
@@ -354,11 +372,26 @@ class AirCastService : Service(), NativeCallbacks {
     }
 
     override fun onVolumeChange(volume: Float) {
-        Log.i(TAG, "Volume change: $volume")
-        // Map 0.0-1.0 float to system media volume level
-        val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val targetVol = (volume * maxVol).roundToInt().coerceIn(0, maxVol)
-        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0)
+        Log.i(TAG, "Volume change: $volume dB")
+        // AirPlay sends volume as negative dB attenuation:
+        //   0.0 dB = maximum (no attenuation)
+        //   -30.0 dB = quiet (Mac slider minimum)
+        //   -144.0 dB = muted
+        //
+        // Convert dB to linear gain (0.0-1.0) for AudioTrack.setVolume().
+        // This controls ONLY the AirPlay audio stream's gain — it does NOT
+        // touch the Android system media volume. The system volume stays at
+        // whatever the user set on the device.
+        //
+        // 10^(dB/20) is the standard dB-to-linear conversion for audio gain:
+        //   0 dB → 1.0 (full volume)
+        //   -6 dB → 0.5 (half perceived loudness)
+        //   -20 dB → 0.1
+        //   -30 dB → 0.032
+        //   -144 dB → 0.0 (mute)
+        val clampedDb = volume.coerceIn(-144.0f, 0.0f)
+        val gain = Math.pow(10.0, clampedDb / 20.0).toFloat()
+        audioPlayer.setVolume(gain)
     }
 
     override fun onConnectionInit() {
@@ -420,7 +453,9 @@ class AirCastService : Service(), NativeCallbacks {
 
     override fun onVideoReset(reason: Int) {
         Log.i(TAG, "Video reset, reason=$reason")
-        videoDecoder.stop()
+        // UxPlay RTP stream was reset. Flush pending frames but keep codec alive
+        // so it can re-sync when the next video stream arrives with CSD data.
+        videoDecoder.flush()
     }
 
     override fun onAudioFlush() {

@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define FRAME_POOL_SIZE 8
+#define FRAME_POOL_SIZE 24
 #define FRAME_BUFFER_SIZE (4 * 1024 * 1024)  /* 4 MB */
 
 typedef struct {
@@ -45,9 +45,16 @@ typedef struct {
     uint8_t *frame_addrs[FRAME_POOL_SIZE];     /* Native addresses of the buffers */
     int frame_pool_free[FRAME_POOL_SIZE];       /* Stack of free indices */
     int frame_pool_head;                        /* Top of free stack */
+    int frame_pool_dropped;                     /* Frames dropped due to pool full */
     pthread_mutex_t frame_pool_lock;            /* Protects free stack */
     sem_t frame_pool_sem;                       /* Counting semaphore for available buffers */
     int frame_pool_initialized;                 /* 1 when pool is ready */
+
+    /* --- Cached JNI method IDs for ByteBuffer operations (avoids per-frame lookup) --- */
+    jclass bytebuffer_class;                    /* GlobalRef to java.nio.ByteBuffer */
+    jmethodID bb_clear;                         /* ByteBuffer.clear() */
+    jmethodID bb_limit;                         /* ByteBuffer.limit(int) */
+    jmethodID bb_position;                      /* ByteBuffer.position(int) */
 } android_callback_ctx_t;
 
 void android_callbacks_init(android_callback_ctx_t *ctx, JNIEnv *env, jobject callback_obj);
@@ -58,7 +65,7 @@ void android_callbacks_fill(raop_callbacks_t *cbs, android_callback_ctx_t *ctx);
 int android_frame_pool_init(android_callback_ctx_t *ctx, JNIEnv *env,
                             jobjectArray buffers, jint count);
 /* Return a buffer to the free list (called from Java via JNI) */
-void android_frame_pool_return(android_callback_ctx_t *ctx, jobject buffer);
+void android_frame_pool_return(android_callback_ctx_t *ctx, JNIEnv *env, jobject buffer);
 /* Destroy the frame buffer pool */
 void android_frame_pool_destroy(android_callback_ctx_t *ctx, JNIEnv *env);
 

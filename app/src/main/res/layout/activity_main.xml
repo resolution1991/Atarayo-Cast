@@ -12,6 +12,17 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- "No input" centered text (shown when not casting) -->
+    <TextView
+        android:id="@+id/noInputText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:text="@string/no_input"
+        android:textColor="#808080"
+        android:textSize="18sp"
+        android:visibility="gone" />
+
     <!-- Debug overlay -->
     <TextView
         android:id="@+id/debugOverlay"
@@ -71,7 +82,18 @@
                 android:textColor="@color/on_surface"
                 android:textSize="14sp" />
 
-            <!-- Close / Back button -->
+            <!-- Refresh button (reload video display) -->
+            <ImageButton
+                android:id="@+id/btnRefresh"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/btn_refresh"
+                android:src="@android:drawable/ic_menu_rotate"
+                android:tint="@color/on_surface" />
+
+            <!-- Close / Stop button -->
             <ImageButton
                 android:id="@+id/btnClose"
                 android:layout_width="36dp"
@@ -103,39 +125,6 @@
                 android:contentDescription="@string/btn_settings"
                 android:src="@android:drawable/ic_menu_manage"
                 android:tint="@color/on_surface" />
-
-        </LinearLayout>
-
-        <!-- Semi-transparent scrim for bottom bar -->
-        <View
-            android:id="@+id/bottomScrim"
-            android:layout_width="match_parent"
-            android:layout_height="96dp"
-            android:layout_gravity="bottom"
-            android:background="@drawable/scrim_gradient_bottom" />
-
-        <!-- Bottom controls -->
-        <LinearLayout
-            android:id="@+id/bottomControls"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom"
-            android:layout_marginBottom="16dp"
-            android:gravity="center"
-            android:orientation="horizontal"
-            android:paddingHorizontal="24dp">
-
-            <!-- Start / Stop button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnStartStop"
-                android:layout_width="56dp"
-                android:layout_height="56dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                app:cornerRadius="28dp"
-                app:icon="@android:drawable/ic_media_play"
-                app:iconGravity="textStart"
-                app:iconSize="28dp" />
 
         </LinearLayout>
 

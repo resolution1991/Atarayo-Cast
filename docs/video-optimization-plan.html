@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Atarayo-Cast 视频流优化方案</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --surface2: #0f3460;
+    --text: #e0e0e0;
+    --text-muted: #8892b0;
+    --accent: #e94560;
+    --accent2: #0f4c75;
+    --green: #4ecca3;
+    --amber: #f0a500;
+    --border: rgba(255,255,255,0.08);
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.7;
+    padding: 40px 20px;
+  }
+  .container { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; color: #fff; }
+  h2 { font-size: 22px; font-weight: 600; margin: 40px 0 16px; color: var(--green); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  h3 { font-size: 17px; font-weight: 600; margin: 24px 0 12px; color: var(--amber); }
+  h4 { font-size: 15px; font-weight: 600; margin: 20px 0 8px; color: #fff; }
+  p { margin-bottom: 12px; color: var(--text); font-size: 15px; }
+  .meta { color: var(--text-muted); font-size: 13px; margin-bottom: 32px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    margin: 16px 0;
+  }
+  .card-green { border-left: 3px solid var(--green); }
+  .card-amber { border-left: 3px solid var(--amber); }
+  .card-accent { border-left: 3px solid var(--accent); }
+  .card-blue { border-left: 3px solid var(--accent2); }
+  .tag {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+  .tag-easy { background: rgba(78,204,163,0.15); color: var(--green); border: 1px solid rgba(78,204,163,0.3); }
+  .tag-medium { background: rgba(240,165,0,0.15); color: var(--amber); border: 1px solid rgba(240,165,0,0.3); }
+  .tag-hard { background: rgba(233,69,96,0.15); color: var(--accent); border: 1px solid rgba(233,69,96,0.3); }
+  .tag-api { background: rgba(15,76,117,0.3); color: #6db3f5; border: 1px solid rgba(15,76,117,0.5); }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th { text-align: left; padding: 10px 12px; color: var(--text-muted); border-bottom: 2px solid var(--border); font-weight: 600; font-size: 13px; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--text); }
+  tr:hover { background: rgba(255,255,255,0.02); }
+  code { background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; color: #6db3f5; }
+  pre { background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; margin: 12px 0; }
+  pre code { background: none; padding: 0; color: #a8b2d1; }
+  .impact { font-weight: 600; }
+  .impact-high { color: var(--green); }
+  .impact-medium { color: var(--amber); }
+  .impact-low { color: var(--text-muted); }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 20px 0; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; }
+  .stat-val { font-size: 28px; font-weight: 700; color: var(--green); }
+  .stat-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .phase { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+  .phase-num { width: 32px; height: 32px; border-radius: 50%; background: var(--accent2); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; color: #fff; flex-shrink: 0; }
+  ul { margin: 8px 0 12px 20px; }
+  li { margin: 4px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Atarayo-Cast 视频流性能优化方案</h1>
+<p class="meta">2026-07-04 · 基于当前管线代码分析 + Android MediaCodec API 研究 · 目标设备: Lenovo YT-K606F (API 24+, minSdk 24)</p>
+
+<div class="summary-grid">
+  <div class="stat"><div class="stat-val">4</div><div class="stat-label">优化维度</div></div>
+  <div class="stat"><div class="stat-val">9</div><div class="stat-label">优化项</div></div>
+  <div class="stat"><div class="stat-val">6</div><div class="stat-label">低风险 (可直接实施)</div></div>
+  <div class="stat"><div class="stat-val">3</div><div class="stat-label">中/高风险 (需验证)</div></div>
+</div>
+
+<h2>一、当前管线分析</h2>
+
+<h3>1.1 数据流</h3>
+<p>当前视频数据流经 7 个阶段，每阶段都有一定的延迟开销：</p>
+<table>
+  <tr><th>阶段</th><th>组件</th><th>估算延迟</th><th>当前状态</th></tr>
+  <tr><td>1. 编码</td><td>Mac (H.264/HEVC 硬件编码)</td><td>~10-20ms</td><td>无法控制（发送端）</td></tr>
+  <tr><td>2. 传输</td><td>RTP over UDP (WiFi)</td><td>~5-20ms</td><td>取决于网络质量</td></tr>
+  <tr><td>3. 接收+解密</td><td>UxPlay (C, RTP线程)</td><td>~2-5ms</td><td>已优化（非阻塞帧池）</td></tr>
+  <tr><td>4. 帧拷贝</td><td>memcpy → DirectByteBuffer</td><td>~0.3-0.5ms</td><td>可优化（zero-copy）</td></tr>
+  <tr><td>5. JNI 传递</td><td>Java onVideoData 回调</td><td>~0.1ms</td><td>已优化（DirectByteBuffer）</td></tr>
+  <tr><td>6. 硬件解码</td><td>MediaCodec async</td><td>~5-15ms</td><td>部分优化（KEY_LOW_LATENCY）</td></tr>
+  <tr><td>7. 渲染</td><td>SurfaceView → SurfaceFlinger</td><td>~3-16ms</td><td>未优化（无帧步调控制）</td></tr>
+</table>
+<p><strong>端到端估算总延迟：25-76ms（约 1.5-4.5 帧 @60fps）</strong>。其中可通过软件优化降低的部分主要是阶段 4-7，理论可降低 5-15ms。</p>
+
+<h3>1.2 已有优化</h3>
+<ul>
+  <li><code>DirectByteBuffer</code> 帧池（8×4MB）— 消除每帧 GC 压力</li>
+  <li><code>sem_trywait</code> 非阻塞获取 — 防止 RTP 线程阻塞</li>
+  <li><code>MediaCodec async</code> 回调模式 — 避免同步 dequeue 轮询</li>
+  <li><code>KEY_LOW_LATENCY=1</code>（API 30+）— 解码器低延迟模式</li>
+  <li>最新帧优先策略 — 实时流场景减少累积延迟</li>
+  <li>NAL 偏移引用解析 — 减少 ByteArray 拷贝</li>
+</ul>
+
+<h3>1.3 缺失的优化</h3>
+<ul>
+  <li><strong>MediaFormat 键不完整</strong>：缺少 KEY_PRIORITY、KEY_OPERATING_RATE、KEY_FRAME_RATE、KEY_COLOR_STANDARD、KEY_COLOR_RANGE、KEY_COLOR_TRANSFER</li>
+  <li><strong>无色彩空间元数据</strong>：解码器不知道输入流的色彩标准，可能使用错误的色彩转换矩阵</li>
+  <li><strong>无帧步调控制</strong>：<code>releaseOutputBuffer(idx, true)</code> 立即渲染，不与 vsync 对齐</li>
+  <li><strong>单帧 pending</strong>：只缓冲一帧，高频场景下丢帧率高</li>
+  <li><strong>无自适应播放</strong>：分辨率变化时需要完全重建 codec，无法无缝切换</li>
+  <li><strong>无渲染时间戳</strong>：未使用 <code>releaseOutputBuffer(idx, timestamp)</code> API 进行音视频同步</li>
+</ul>
+
+<h2>二、优化方案</h2>
+
+<h3>2.1 延迟优化</h3>
+
+<div class="card card-green">
+  <h4>优化 1: 补全 MediaFormat 解码器配置键</h4>
+  <p><span class="tag tag-easy">低风险</span> <span class="tag tag-api">API 23+</span> <span class="impact impact-high">影响：高</span></p>
+  <p>当前 <code>configureCodec()</code> 只设置了 <code>KEY_LOW_LATENCY</code> 和 <code>KEY_MAX_INPUT_SIZE</code>。缺少以下关键键：</p>
+  <table>
+    <tr><th>键</th><th>API Level</th><th>建议值</th><th>作用</th></tr>
+    <tr><td><code>KEY_PRIORITY</code></td><td>23</td><td><code>0</code> (实时)</td><td>告知解码器这是实时流，优先调度</td></tr>
+    <tr><td><code>KEY_OPERATING_RATE</code></td><td>23</td><td><code>60</code> 或 <code>120</code></td><td>提示解码器目标帧率，优化内部流水线</td></tr>
+    <tr><td><code>KEY_FRAME_RATE</code></td><td>21</td><td><code>60</code></td><td>输入流帧率信息，帮助解码器调度</td></tr>
+  </table>
+  <pre><code>// 在 configureCodec() 中添加:
+format.setInteger(MediaFormat.KEY_PRIORITY, 0)  // 0 = realtime
+format.setInteger(MediaFormat.KEY_OPERATING_RATE, 120)  // 目标 fps × 2 余量
+format.setInteger(MediaFormat.KEY_FRAME_RATE, 60)</code></pre>
+  <p><strong>可行性</strong>：极高。纯 API 调用，不改变管线结构，设备 API 24 已支持 KEY_PRIORITY 和 KEY_OPERATING_RATE。</p>
+  <p><strong>预期收益</strong>：解码器在硬件层面更积极地调度，减少内部缓冲延迟 2-5ms。</p>
+</div>
+
+<div class="card card-amber">
+  <h4>优化 2: 使用 releaseOutputBuffer 渲染时间戳</h4>
+  <p><span class="tag tag-medium">中风险</span> <span class="tag tag-api">API 21+</span> <span class="impact impact-medium">影响：中</span></p>
+  <p>当前 <code>onOutputBufferAvailable</code> 使用 <code>releaseOutputBuffer(index, true)</code> 立即渲染。Android API 21+ 支持 <code>releaseOutputBuffer(index, renderTimestampNs)</code>，可以指定渲染时间戳。</p>
+  <pre><code>// 当前:
+codec.releaseOutputBuffer(index, true)
+
+// 优化为: 使用 NTP 时间戳对齐 vsync
+val renderNs = System.nanoTime()  // 或基于 pts 计算
+codec.releaseOutputBuffer(index, renderNs)</code></pre>
+  <p><strong>可行性</strong>：中等。需要将 NTP 时间戳转换为 nanotime 基准，且并非所有设备都精确支持 timestamp 渲染。如果时间戳计算有误，可能导致画面卡顿。</p>
+  <p><strong>预期收益</strong>：帧渲染与 vsync 对齐，减少画面撕裂和抖动，视觉流畅度提升。</p>
+  <p><strong>风险</strong>：时间戳映射不准会导致帧延迟增加而非减少。建议先实现但不使用时间戳（传 0），作为后续调优选项。</p>
+</div>
+
+<div class="card card-amber">
+  <h4>优化 3: 多帧 pending 缓冲（2-3 帧）</h4>
+  <p><span class="tag tag-medium">中风险</span> <span class="impact impact-medium">影响：中</span></p>
+  <p>当前只缓冲 1 帧（最新帧覆盖旧帧）。在解码器短暂卡顿时（如处理 B 帧或 IDR 帧），后续帧会被丢弃。改为 2-3 帧环形缓冲可减少丢帧率。</p>
+  <pre><code>// 当前: 单帧 pendingFrame
+// 优化为: ArrayDeque 帧队列（最大 3 帧）
+private val pendingFrames = ArrayDeque<FrameData>()
+data class FrameData(val buffer: ByteBuffer, val size: Int, val pts: Long, val isH265: Boolean)
+
+fun handleFrame(...) {
+    pendingFrames.addLast(FrameData(data, size, ntpTime, isH265))
+    if (pendingFrames.size > MAX_PENDING) {
+        pendingFrames.removeFirst()  // 丢弃最旧帧
+    }
+    tryFeedPendingFrame()
+}</code></pre>
+  <p><strong>权衡</strong>：增加最多 2 帧延迟（~33ms @60fps），但减少丢帧率。对于投屏场景，延迟增加不明显但流畅度提升明显。</p>
+  <p><strong>可行性</strong>：中等。需要修改 feedFrameToCodec 逻辑和缓冲区归还时机。</p>
+</div>
+
+<h3>2.2 色彩与显示质量优化</h3>
+
+<div class="card card-green">
+  <h4>优化 4: 设置色彩空间元数据</h4>
+  <p><span class="tag tag-easy">低风险</span> <span class="tag tag-api">API 24+</span> <span class="impact impact-high">影响：高</span></p>
+  <p>当前完全没有色彩空间元数据。AirPlay 屏幕镜像使用 BT.709 色彩标准（SDR 8-bit），但解码器不知道这一点，可能使用错误的 YUV→RGB 转换矩阵，导致色彩偏移。</p>
+  <table>
+    <tr><th>键</th><th>建议值</th><th>含义</th></tr>
+    <tr><td><code>KEY_COLOR_STANDARD</code></td><td><code>1</code> (BT.709)</td><td>HDR 内容使用 <code>4</code> (BT.2020)</td></tr>
+    <tr><td><code>KEY_COLOR_RANGE</code></td><td><code>2</code> (完整范围)</td><td>AirPlay 通常使用 0-255 完整范围</td></tr>
+    <tr><td><code>KEY_COLOR_TRANSFER</code></td><td><code>6</code> (BT.709)</td><td>SDR 使用 BT.709 传输函数</td></tr>
+  </table>
+  <pre><code>// 在 configureCodec() 中添加:
+format.setInteger(MediaFormat.KEY_COLOR_STANDARD,
+    MediaFormat.COLOR_STANDARD_BT709)  // = 1
+format.setInteger(MediaFormat.KEY_COLOR_RANGE,
+    MediaFormat.COLOR_RANGE_FULL)  // = 2
+format.setInteger(MediaFormat.KEY_COLOR_TRANSFER,
+    MediaFormat.COLOR_TRANSFER_BT709)  // = 6</code></pre>
+  <p><strong>可行性</strong>：极高。纯 API 调用，设备 API 24 已支持。从 AirPlay 规范可知 macOS 屏幕镜像使用 H.264 High Profile + BT.709。</p>
+  <p><strong>预期收益</strong>：纠正色彩转换矩阵，消除色彩偏移/发白/发灰问题。这是视觉质量提升最明显的单项优化。</p>
+</div>
+
+<div class="card card-amber">
+  <h4>优化 5: SPS 解析提取色彩信息</h4>
+  <p><span class="tag tag-medium">中风险</span> <span class="impact impact-medium">影响：中</span></p>
+  <p>H.264 SPS NAL 单元中包含 <code>vui_parameters</code> 字段，其中有 <code>colour_primaries</code>、<code>transfer_characteristics</code>、<code>matrix_coefficients</code> 信息。可以从 SPS 中解析这些值，动态设置色彩标准。</p>
+  <pre><code>// H.264 SPS VUI 参数解析 (简化):
+// - matrix_coefficients = 1 → BT.709
+// - matrix_coefficients = 9 → BT.2020
+// - colour_primaries = 1 → BT.709
+// - transfer_characteristics = 1 → BT.709
+//
+// 需要扩展 extractCsdOptimized() 返回色彩信息
+// 然后在 configureCodec() 中使用实际值</code></pre>
+  <p><strong>可行性</strong>：中等。需要实现 SPS VUI 解析器（~50 行 C/位操作代码），但一旦实现可自动适配 HDR 内容。</p>
+  <p><strong>预期收益</strong>：自动适配不同色彩空间，未来支持 HDR 投屏时不需要手动修改。</p>
+</div>
+
+<div class="card card-accent">
+  <h4>优化 6: 10-bit / HDR 支持</h4>
+  <p><span class="tag tag-hard">高风险</span> <span class="tag tag-api">API 24+</span> <span class="impact impact-low">影响：低（当前）</span></p>
+  <p>macOS 屏幕镜像目前只发送 8-bit SDR H.264 流，HDR 暂不可用。但未来 Apple 可能推送 10-bit HEVC HDR 流。可预留支持：</p>
+  <ul>
+    <li>HEVC Main 10 Profile: <code>HEVCProfileMain10</code></li>
+    <li>HDR 静态元数据: <code>KEY_HDR_STATIC_INFO</code>（SMPTE ST.2086）</li>
+    <li>色彩标准: <code>COLOR_STANDARD_BT2020</code></li>
+    <li>色彩传输: <code>COLOR_TRANSFER_HLG</code> 或 <code>COLOR_TRANSFER_ST2084</code></li>
+  </ul>
+  <p><strong>可行性</strong>：低（当前不可用，AirPlay 不发 HDR 流）。仅作为未来预留设计，当前不实现。</p>
+</div>
+
+<h3>2.3 帧率优化</h3>
+
+<div class="card card-green">
+  <h4>优化 7: SurfaceView setFixedSize 优化</h4>
+  <p><span class="tag tag-easy">低风险</span> <span class="impact impact-medium">影响：中</span></p>
+  <p>当前 SurfaceView 使用 <code>match_parent</code> 全屏铺满。当视频分辨率与屏幕宽高比不一致时，SurfaceFlinger 需要进行额外的缩放合成。设置 <code>setFixedSize</code> 使 Surface 缓冲区与视频分辨率匹配，让 GPU 而非 SurfaceFlinger 进行缩放。</p>
+  <pre><code>// 在 surfaceChanged 或 onVideoSize 回调中:
+holder.setFixedSize(videoWidth, videoHeight)
+// SurfaceView 会自动按 videoWidth:videoHeight 比例缩放到屏幕</code></pre>
+  <p><strong>权衡</strong>：如果视频分辨率与屏幕分辨率完全一致（自适应模式），setFixedSize 无效果甚至可能降低质量。仅在手动分辨率模式下有意义。</p>
+  <p><strong>可行性</strong>：高。但需注意 setFixedSize 会触发 surfaceChanged 回调，需要避免循环。</p>
+</div>
+
+<div class="card card-green">
+  <h4>优化 8: 自适应播放支持</h4>
+  <p><span class="tag tag-easy">低风险</span> <span class="tag tag-api">API 23+</span> <span class="impact impact-medium">影响：中</span></p>
+  <p>当视频分辨率变化时（如 Mac 切换窗口大小或旋转屏幕），当前代码完全释放并重建 codec。使用 <code>KEY_MAX_WIDTH</code> + <code>KEY_MAX_HEIGHT</code> 可启用自适应播放，codec 内部处理分辨率变化，无需重建。</p>
+  <pre><code>// 在 configureCodec() 中添加:
+format.setInteger(MediaFormat.KEY_MAX_WIDTH, 3840)  // 最大支持 4K
+format.setInteger(MediaFormat.KEY_MAX_HEIGHT, 2160)
+// 之后分辨率变化只需 flush + 重新 start，无需 release/create</code></pre>
+  <p><strong>可行性</strong>：高。但需要确认设备解码器是否支持 FEATURE_AdaptivePlayback（大多数现代设备支持）。</p>
+  <p><strong>预期收益</strong>：分辨率切换时无黑屏闪烁，切换耗时从 ~200ms 降到 ~20ms。</p>
+</div>
+
+<h3>2.4 渲染质量优化</h3>
+
+<div class="card card-blue">
+  <h4>优化 9: SurfaceView 帧步调 (Choreographer)</h4>
+  <p><span class="tag tag-medium">中风险</span> <span class="tag tag-api">API 24+</span> <span class="impact impact-medium">影响：中</span></p>
+  <p>当前 <code>onOutputBufferAvailable</code> 中立即 <code>releaseOutputBuffer(index, true)</code>，不与显示 vsync 对齐。如果解码完成时恰好错过 vsync，帧要等下一个 vsync 周期（~16ms）才能显示。</p>
+  <p>有两种方案：</p>
+  <h4>方案 A: releaseOutputBuffer timestamp（推荐）</h4>
+  <pre><code>// 使用渲染时间戳 API (API 21+)
+// 传 0 表示立即渲染（当前行为）
+// 传 System.nanoTime() 表示在下一个 vsync 渲染
+override fun onOutputBufferAvailable(codec, index, info) {
+    if (surface == null) {
+        codec.releaseOutputBuffer(index, false)
+        return
+    }
+    // 使用 0 = 立即渲染（保持当前行为，最安全）
+    // 或使用 nanoTime 对齐 vsync（需要验证）
+    codec.releaseOutputBuffer(index, 0L)
+}</code></pre>
+  <h4>方案 B: Choreographer 帧回调</h4>
+  <pre><code>// 在主线程注册 Choreographer 回调，在 vsync 信号到达时
+// 才 releaseOutputBuffer(index, true)
+// 风险：需要跨线程协调，可能引入额外延迟</code></pre>
+  <p><strong>推荐</strong>：方案 A，传入 <code>0L</code> 保持立即渲染但明确使用 timestamp API。未来可基于 PTS 计算精确渲染时间。</p>
+</div>
+
+<h2>三、实施计划</h2>
+
+<h3>Phase A: 低风险快速优化（立即可做）</h3>
+
+<div class="phase">
+  <div class="phase-num">1</div>
+  <div>
+    <strong>补全 MediaFormat 配置键</strong>（优化 1 + 4）<br>
+    <span style="color:var(--text-muted);font-size:14px">添加 KEY_PRIORITY=0, KEY_OPERATING_RATE=120, KEY_FRAME_RATE=60, KEY_COLOR_STANDARD=BT.709, KEY_COLOR_RANGE=FULL, KEY_COLOR_TRANSFER=BT.709</span>
+  </div>
+</div>
+
+<div class="phase">
+  <div class="phase-num">2</div>
+  <div>
+    <strong>启用自适应播放</strong>（优化 8）<br>
+    <span style="color:var(--text-muted);font-size:14px">添加 KEY_MAX_WIDTH=3840, KEY_MAX_HEIGHT=2160，修改 setSize() 使用 flush 代替 release</span>
+  </div>
+</div>
+
+<div class="phase">
+  <div class="phase-num">3</div>
+  <div>
+    <strong>使用 releaseOutputBuffer timestamp API</strong>（优化 9 方案 A）<br>
+    <span style="color:var(--text-muted);font-size:14px">改为 releaseOutputBuffer(index, 0L)，为未来时间戳渲染预留接口</span>
+  </div>
+</div>
+
+<h3>Phase B: 中等风险优化（验证后实施）</h3>
+
+<div class="phase">
+  <div class="phase-num">4</div>
+  <div>
+    <strong>多帧 pending 缓冲</strong>（优化 3）<br>
+    <span style="color:var(--text-muted);font-size:14px">将单帧 pending 改为 2-3 帧队列，减少丢帧率</span>
+  </div>
+</div>
+
+<div class="phase">
+  <div class="phase-num">5</div>
+  <div>
+    <strong>SPS VUI 色彩解析</strong>（优化 5）<br>
+    <span style="color:var(--text-muted);font-size:14px">从 H.264 SPS NAL 中解析 VUI 参数，动态设置色彩标准</span>
+  </div>
+</div>
+
+<div class="phase">
+  <div class="phase-num">6</div>
+  <div>
+    <strong>SurfaceView setFixedSize</strong>（优化 7）<br>
+    <span style="color:var(--text-muted);font-size:14px">手动分辨率模式下设置 Surface 缓冲区大小匹配视频分辨率</span>
+  </div>
+</div>
+
+<h3>Phase C: 未来预留（不实施）</h3>
+
+<div class="phase">
+  <div class="phase-num">7</div>
+  <div>
+    <strong>HDR / 10-bit 支持</strong>（优化 6）<br>
+    <span style="color:var(--text-muted);font-size:14px">当 AirPlay 协议支持 HDR 流时再实现</span>
+  </div>
+</div>
+
+<h3>Phase D: 延迟终极优化（研究性）</h3>
+
+<div class="phase">
+  <div class="phase-num">8</div>
+  <div>
+    <strong>Zero-copy 帧传递</strong><br>
+    <span style="color:var(--text-muted);font-size:14px">将 UxPlay 的解码帧直接写入 Surface 的 BufferQueue（通过 ANativeWindow_lock），消除 memcpy 拷贝。需要修改 UxPlay C 代码和 JNI 层，复杂度高。</span>
+  </div>
+</div>
+
+<h2>四、预期收益总结</h2>
+
+<table>
+  <tr><th>优化项</th><th>延迟</th><th>色彩</th><th>帧率/流畅度</th><th>风险</th><th>Phase</th></tr>
+  <tr><td>1. MediaFormat 键补全</td><td style="color:var(--green)">-2~5ms</td><td>-</td><td style="color:var(--green)">改善</td><td style="color:var(--green)">低</td><td>A</td></tr>
+  <tr><td>2. 渲染时间戳</td><td style="color:var(--amber)">±0ms</td><td>-</td><td style="color:var(--green)">改善</td><td style="color:var(--amber)">中</td><td>A</td></tr>
+  <tr><td>3. 多帧缓冲</td><td style="color:var(--accent)">+16ms</td><td>-</td><td style="color:var(--green)">明显改善</td><td style="color:var(--amber)">中</td><td>B</td></tr>
+  <tr><td>4. 色彩空间元数据</td><td>-</td><td style="color:var(--green)">明显改善</td><td>-</td><td style="color:var(--green)">低</td><td>A</td></tr>
+  <tr><td>5. SPS VUI 解析</td><td>-</td><td style="color:var(--green)">改善</td><td>-</td><td style="color:var(--amber)">中</td><td>B</td></tr>
+  <tr><td>6. HDR 支持</td><td>-</td><td>-</td><td>-</td><td style="color:var(--accent)">高</td><td>C</td></tr>
+  <tr><td>7. setFixedSize</td><td style="color:var(--green)">-1ms</td><td style="color:var(--green)">改善</td><td>-</td><td style="color:var(--green)">低</td><td>B</td></tr>
+  <tr><td>8. 自适应播放</td><td style="color:var(--green)">-180ms (切换时)</td><td>-</td><td style="color:var(--green)">改善</td><td style="color:var(--green)">低</td><td>A</td></tr>
+  <tr><td>9. Zero-copy</td><td style="color:var(--green)">-0.5ms</td><td>-</td><td>-</td><td style="color:var(--accent)">高</td><td>D</td></tr>
+</table>
+
+<div class="card card-green" style="margin-top:32px">
+  <h4>推荐立即实施: Phase A（优化 1+4+8+9）</h4>
+  <p>这四项优化全部是 <code>configureCodec()</code> 方法中添加几行 MediaFormat 键设置，以及 <code>onOutputBufferAvailable</code> 中一行 API 变更。</p>
+  <p>总代码改动量：<strong>~20 行</strong>。风险极低，不改变管线结构。预期效果：</p>
+  <ul>
+    <li><strong>色彩</strong>：纠正 YUV→RGB 转换矩阵，消除色彩偏移（最明显感知提升）</li>
+    <li><strong>延迟</strong>：解码器更积极调度，减少 2-5ms 内部延迟</li>
+    <li><strong>流畅度</strong>：分辨率切换无黑屏，帧渲染更稳定</li>
+  </ul>
+</div>
+
+</div>
+</body>
+</html>

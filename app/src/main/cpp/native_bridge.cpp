@@ -164,10 +164,44 @@ Java_com_atarayocast_app_bridge_NativeBridge_nativeStart(
 
     /* Register dnssd records (stored in shim, Kotlin reads them) */
     if (ctx->dnssd) {
+        uint64_t features = dnssd_get_airplay_features(ctx->dnssd);
+        LOGI("nativeStart: features = 0x%llX (bit 42 H265 = %s, bit 27 legacy pairing = %s)",
+             (unsigned long long)features,
+             (features & (1ULL << 42)) ? "ON" : "OFF",
+             (features & (1ULL << 27)) ? "ON" : "OFF");
         dnssd_register_raop(ctx->dnssd, port);
         dnssd_register_airplay(ctx->dnssd, port);
     }
 
+    return (jint)port;
+}
+
+/**
+ * Restart the RAOP HTTP server to kick the current AirPlay client.
+ * This stops and re-starts the HTTPD without touching DNS-SD registration,
+ * so the Mac can immediately rediscover and reconnect.
+ * Returns the port number, or -1 on failure.
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_atarayocast_app_bridge_NativeBridge_nativeRestartHttpd(
+        JNIEnv *env, jobject thiz, jlong handle, jint requestedPort) {
+
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    if (!ctx || !ctx->raop) return -1;
+
+    LOGI("Restarting RAOP HTTPD to disconnect client");
+
+    raop_stop_httpd(ctx->raop);
+
+    unsigned short port = (unsigned short)(requestedPort > 0 ? requestedPort : 7000);
+    int ret = raop_start_httpd(ctx->raop, &port);
+    if (ret < 0) {
+        LOGE("raop_start_httpd failed during restart: %d", ret);
+        return -1;
+    }
+
+    LOGI("RAOP HTTPD restarted on port %d", port);
     return (jint)port;
 }
 
@@ -319,9 +353,14 @@ Java_com_atarayocast_app_bridge_NativeBridge_nativeSetH265Enabled(
     server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
     if (!ctx) return;
     ctx->cb_ctx.h265_enabled = enabled ? 1 : 0;
-    /* Set DNS-SD feature bit 42 (SupportsScreenMultiCodec) for H265 */
+    LOGI("nativeSetH265Enabled: enabled=%d h265_enabled=%d", enabled ? 1 : 0, ctx->cb_ctx.h265_enabled);
+
     if (ctx->dnssd) {
         dnssd_set_airplay_features(ctx->dnssd, 42, enabled ? 1 : 0);
+        uint64_t features = dnssd_get_airplay_features(ctx->dnssd);
+        LOGI("nativeSetH265Enabled: features bitmask = 0x%llX (bit 42 = %s)",
+             (unsigned long long)features,
+             (features & (1ULL << 42)) ? "SET" : "NOT SET");
     }
 }
 
@@ -398,7 +437,7 @@ Java_com_atarayocast_app_bridge_NativeBridge_nativeReturnFrameBuffer(
         return;
     }
 
-    android_frame_pool_return(&ctx->cb_ctx, buffer);
+    android_frame_pool_return(&ctx->cb_ctx, env, buffer);
 }
 
 /* ---------- Software ALAC decoder (Apple reference, Apache 2.0) ---------- */

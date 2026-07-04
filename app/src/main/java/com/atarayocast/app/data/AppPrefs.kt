@@ -45,9 +45,9 @@ class AppPrefs(private val context: Context) {
         dataStore.edit { it[KEY_ADAPTIVE_RESOLUTION] = enabled }
     }
 
-    // H.265 / 4K
+    // H.265 / 4K — default ON for higher quality and 60fps support
     val h265Enabled: Flow<Boolean> = dataStore.data.map { prefs ->
-        prefs[KEY_H265_ENABLED] ?: false
+        prefs[KEY_H265_ENABLED] ?: true
     }
 
     suspend fun setH265Enabled(enabled: Boolean) {

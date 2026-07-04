@@ -144,8 +144,6 @@ class MainActivity : AppCompatActivity() {
     // ---- Touch for overlay toggle ----
 
     private fun setupTouchListener() {
-        // Tapping the surface itself toggles overlay visibility in fullscreen.
-        // Buttons are children of controlOverlay and handle their own clicks.
         binding.surfaceView.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_DOWN) {
                 if (isFullscreen) {
@@ -190,15 +188,6 @@ class MainActivity : AppCompatActivity() {
     // ---- Buttons ----
 
     private fun setupButtons() {
-        // Overlay: Start/Stop main button
-        binding.btnStartStop.setOnClickListener {
-            if (viewModel.serviceRunning.value == true) {
-                stopService()
-            } else {
-                requestNotificationPermissionAndStart()
-            }
-        }
-
         // Legacy buttons (non-fullscreen card)
         binding.btnStartLegacy.setOnClickListener {
             requestNotificationPermissionAndStart()
@@ -213,15 +202,44 @@ class MainActivity : AppCompatActivity() {
             scheduleOverlayHide()
         }
 
-        // Close button (visible in fullscreen only when casting)
+        // Close button — disconnect AirPlay session but keep service running
         binding.btnClose.setOnClickListener {
-            stopService()
+            Log.i(TAG, "Close button clicked — disconnecting AirPlay, keeping service")
+            serviceBinder?.disconnectClient()
+            // Exit fullscreen directly — don't wait for broadcast
+            isCasting = false
+            binding.noInputText.visibility = View.VISIBLE
+            if (isFullscreen) {
+                isFullscreen = false
+                exitFullscreen()
+            }
         }
 
         // Settings
         binding.btnSettings.setOnClickListener {
             val intent = Intent(this, SettingsActivity::class.java)
             startActivity(intent)
+        }
+
+        // Refresh button — clears the Surface to remove visual artifacts.
+        // Does NOT touch MediaCodec — just paints black on the Surface,
+        // and the next decoded frame will overwrite naturally.
+        binding.btnRefresh.setOnClickListener {
+            Log.i(TAG, "Refresh button clicked — clearing Surface")
+            try {
+                val holder = binding.surfaceView.holder
+                val surface = holder.surface
+                if (surface != null && surface.isValid) {
+                    val canvas = holder.lockCanvas()
+                    if (canvas != null) {
+                        canvas.drawColor(android.graphics.Color.BLACK)
+                        holder.unlockCanvasAndPost(canvas)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to clear Surface", e)
+            }
+            scheduleOverlayHide()
         }
     }
 
@@ -396,7 +414,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun observeViewModel() {
         viewModel.serviceRunning.observe(this) { running ->
-            updateStartStopButton(running)
+            // Update legacy button enabled/disabled states
+            binding.btnStartLegacy.isEnabled = !running
+            binding.btnStopLegacy.isEnabled = running
             if (running) {
                 updateKeepScreenOn()
             }
@@ -445,8 +465,21 @@ class MainActivity : AppCompatActivity() {
     // ---- UI State ----
 
     private fun updateUI(state: Constants.ConnectionState) {
+        val wasCasting = isCasting
         isCasting = state == Constants.ConnectionState.CONNECTED ||
                    state == Constants.ConnectionState.STREAMING
+
+        // Feature 1: Auto-enter fullscreen when casting starts
+        if (isCasting && !wasCasting && !isFullscreen) {
+            isFullscreen = true
+            enterFullscreen()
+        }
+
+        // Auto-exit fullscreen when casting ends (WAITING or IDLE)
+        if (!isCasting && wasCasting && isFullscreen) {
+            isFullscreen = false
+            exitFullscreen()
+        }
 
         when (state) {
             Constants.ConnectionState.IDLE -> {
@@ -475,6 +508,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Feature 4: Show "no input" text when not casting, hide when casting
+        binding.noInputText.visibility = if (isCasting) View.GONE else View.VISIBLE
+
         // Update non-fullscreen card
         if (!isFullscreen) {
             if (isCasting) {
@@ -491,20 +527,6 @@ class MainActivity : AppCompatActivity() {
 
         // Update keep screen on
         updateKeepScreenOn()
-    }
-
-    private fun updateStartStopButton(running: Boolean) {
-        if (running) {
-            binding.btnStartStop.setIconResource(android.R.drawable.ic_media_pause)
-            binding.btnStartStop.contentDescription = getString(R.string.btn_stop)
-            binding.btnStopLegacy.isEnabled = true
-            binding.btnStartLegacy.isEnabled = false
-        } else {
-            binding.btnStartStop.setIconResource(android.R.drawable.ic_media_play)
-            binding.btnStartStop.contentDescription = getString(R.string.btn_start)
-            binding.btnStopLegacy.isEnabled = false
-            binding.btnStartLegacy.isEnabled = true
-        }
     }
 
     // ---- Lifecycle ----

@@ -590,11 +590,137 @@ enum class Resolution(val key: String, val width: Int, val height: Int, val fps:
 
 ---
 
+## v0.2 — 视频优化 + 音量控制 + UI 增强 (2026-07-04)
+
+### 1. Surface 生命周期修复
+
+**问题：** 进入设置页面再返回后画面崩坏（黑屏/花屏）。首次修复尝试引入 CSD 缓存和 surface 生命周期管理，反而引入了竞态条件导致首次投屏也无法显示。
+
+**根因：**
+- `setSurface(null)` 中调用 `releaseCodec()` 销毁了 mid-stream 的 codec
+- 返回后 Surface 重建，但新帧不含 CSD（SPS/PPS），codec 无法重新配置
+- CSD 缓存在 handler 消息队列中存在竞态
+
+**最终修复：** Surface 切换时保持 codec 存活，不释放不重建。使用 `setOutputSurface()` (API 23+) 重新挂载 Surface。输出渲染前检查 surface 是否为空，为空则跳过渲染。
+
+### 2. Phase A 视频性能优化
+
+**MediaFormat 配置键补全：**
+- `KEY_PRIORITY=0` (实时优先级)
+- `KEY_OPERATING_RATE=120` (目标帧率×2余量)
+- `KEY_FRAME_RATE=60` (输入帧率)
+- `KEY_COLOR_STANDARD=BT.709` (纠正 YUV→RGB 转换矩阵)
+- `KEY_COLOR_RANGE=LIMITED` (16-235 有限范围)
+- `KEY_COLOR_TRANSFER=SDR_VIDEO` (BT.709 SDR 传输函数)
+- `KEY_MAX_WIDTH=3840, KEY_MAX_HEIGHT=2160` (自适应播放)
+- 编译错误修复：`COLOR_TRANSFER_BT709` 不存在 → 使用 `COLOR_TRANSFER_SDR_VIDEO`；`MediaCodec.getCodecInfo()` 是 API 29+ → 改用 `MediaCodecList`
+
+**自适应播放：** `setSize()` 不再调用 `releaseCodec()`，codec 通过 SPS 自动处理分辨率变化。
+
+**渲染时间戳 API：** `releaseOutputBuffer(index, true)` → `releaseOutputBuffer(index, 0L)`。
+
+### 3. 块状压缩伪影修复
+
+**问题：** 投屏画面出现块状压缩伪影（宏块化失真）。
+
+**根因 1（Kotlin 层）：** "最新帧优先"策略盲目丢弃 pending 帧，当 IDR 关键帧被丢弃后，后续 P/B 帧丢失参考帧导致宏块伪影。
+- 新增 `isIdrFrame()` 方法：扫描 NAL start codes 检测 IDR
+- `handleFrame()` 中：当 pending 帧是 IDR 且新帧不是 IDR 时，不替换 pending
+- `feedFrameToCodec()` 对 IDR 帧设置 `BUFFER_FLAG_KEY_FRAME` 标志
+
+**根因 2（C 层）：** 原生帧池满时盲目丢弃所有帧（包括 IDR 关键帧）。
+- 新增 `_is_idr_frame()` C 函数检测 IDR
+- 新增 `_frame_pool_acquire_idr()` 函数：IDR 帧池满时 `sem_timedwait` 等待 15ms
+- 非 IDR 帧池满立即丢弃
+
+**根因 3（首帧丢失）：** `handleFrame()` 中首帧（含 SPS+PPS+IDR）被 `configureCodec()` 提取 CSD 后直接归还缓冲区。IDR slice 数据丢失。
+- 修复：`configureCodec()` 后将首帧设为 pendingFrame 并立即喂给解码器
+
+### 4. H.265 协商诊断
+
+**问题：** H.265 设置已开启但实际仍使用 H.264。
+
+**诊断日志发现：**
+- `features bitmask = 0x4005A7FFEE6 (bit 42 = SET)` — bit 42 正确设置
+- `video_set_codec: codec=1 (H264)` — macOS 仍发送 H.264
+- `model=AppleTV3,2` — Apple TV 3代(2012) 不支持 HEVC
+
+**修复尝试：** `GLOBAL_MODEL` 从 `AppleTV3,2` 改为 `AppleTV6,2` (Apple TV 4K 1代, 2017)。但 macOS 仍选择 H.264。结论：macOS 的编解码器选择逻辑是苹果私有的，已设置所有已知接收端信号（model + features bit），不再继续尝试。
+
+### 5. 帧池扩大
+
+- `FRAME_POOL_SIZE` 从 8 改为 16 → 最终 24
+- `POOL_SIZE` 从 8 改为 16 → 最终 24
+- 帧池容量三倍化，容纳更多在途帧，降低丢帧率
+
+### 6. JNI 方法 ID 缓存
+
+**问题：** `_video_process()` 每帧执行 `GetObjectClass` + `GetMethodID("clear")` + `GetMethodID("limit")` + `DeleteLocalRef`，30fps 下每秒 180+ 次冗余 JNI 调用。
+
+**修复：**
+- `android_raop_callbacks.h` 结构体新增 `bytebuffer_class` (GlobalRef) + `bb_clear` / `bb_limit` / `bb_position` 方法 ID
+- `android_callbacks_init()` 中通过 `FindClass("java/nio/ByteBuffer")` 缓存类和方法 ID
+- `_video_process()` 改用缓存的方法 ID
+
+### 7. 解码线程优先级
+
+`HandlerThread("VideoDecoder")` → `HandlerThread("VideoDecoder", Process.THREAD_PRIORITY_DISPLAY)`。系统负载高时减少解码延迟。
+
+### 8. 音量控制架构
+
+**问题 1：** 调整 Mac 音量时安卓设备系统音量归零。
+- 根因：AirPlay 音量是负 dB 衰减值（0.0=最大，-144.0=静音），被误当作 0.0-1.0 线性比例直接乘以 maxVol。
+
+**问题 2：** 纯线性映射后仍有问题——调音量键时声音突然变 100%，Mac 音量 0 时仍有声。
+- 根因：控制了系统媒体音量而非投屏音量。
+
+**最终修复：**
+- **不再控制系统音量**，改用 `AudioTrack.setVolume(gain)` 控制投屏音频增益
+- dB→线性：`gain = 10^(dB/20)`（0.0-1.0 连续值）
+- `AudioPlayer.kt` 新增 `airplayGain` 字段 + `setVolume(gain)` 方法
+- 焦点 duck：`airplayGain * 0.3f`（不覆盖 airplayGain）
+- 焦点 restore：恢复 `airplayGain`（不再硬编码 1.0f）
+
+### 9. UI 功能增强
+
+**自动全屏：**
+- 投屏连接成功时自动进入全屏
+- 投屏结束时自动退出全屏
+
+**移除遗留按钮：**
+- 移除底部"暂停"按钮（btnStartStop）及底部 scrim
+- 移除 `updateStartStopButton()` 方法
+- 底部不再有任何按钮（全屏控制仅通过顶部工具栏）
+
+**刷新按钮：**
+- 顶部工具栏新增刷新按钮
+- 点击后用 Canvas 在 Surface 上画黑色，清除画面伪影
+- 不触碰 MediaCodec，下一个解码帧自然覆盖
+
+**断开连接：**
+- 关闭按钮改为断开连接而非停止服务
+- 新增 `nativeRestartHttpd` JNI 方法：重启 RAOP HTTPD 断开 Mac 连接
+- `disconnectClient()`：重启 HTTPD + 停止本地播放 + 状态→WAITING
+- mDNS 注册保持，Mac 可立即重新连接
+
+**"当前无投屏输入"提示：**
+- 新增居中 TextView，灰色文字
+- 未投屏时显示，投屏开始后隐藏
+
+### 10. 编译修复
+
+- `COLOR_TRANSFER_BT709` 不存在 → 使用 `COLOR_TRANSFER_SDR_VIDEO`
+- `MediaCodec.getCodecInfo()` 是 API 29+ → 改用 `MediaCodecList(MediaCodecList.REGULAR_CODECS)`
+- `android:drawable/ic_popup_rotate` 不存在 → 改用 `ic_menu_rotate`
+
+---
+
 ## 版本历史
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
 | v0.1 | 2026-07-04 | 基线版本：AirPlay + DLNA + 全部功能 |
+| v0.2 | 2026-07-04 | 视频优化 + 音量控制 + UI 增强 + Bug 修复 |
 
 ---
 

@@ -17,7 +17,7 @@ class NativeBridge {
 
     companion object {
         private const val TAG = "NativeBridge"
-        private const val POOL_SIZE = 8
+        private const val POOL_SIZE = 24
         private const val BUFFER_SIZE = 4 * 1024 * 1024  // 4 MB
 
         init {
@@ -84,6 +84,17 @@ class NativeBridge {
             running.set(false)
             Log.i(TAG, "Native server stopped")
         }
+    }
+
+    /**
+     * Restart the RAOP HTTP server to kick the current AirPlay client.
+     * DNS-SD registration is preserved so the Mac can immediately rediscover.
+     */
+    fun restartHttpd(port: Int): Int {
+        if (!initialized.get()) return -1
+        val newPort = nativeRestartHttpd(nativeHandle, port)
+        Log.i(TAG, "RAOP HTTPD restarted on port $newPort")
+        return newPort
     }
 
     fun destroy() {
@@ -181,6 +192,7 @@ class NativeBridge {
 
     private external fun nativeStart(handle: Long, requestedPort: Int): Int
     private external fun nativeStop(handle: Long)
+    private external fun nativeRestartHttpd(handle: Long, requestedPort: Int): Int
     private external fun nativeDestroy(handle: Long)
     private external fun nativeSetDisplaySize(handle: Long, width: Int, height: Int, fps: Int)
     private external fun nativeSetH265Enabled(handle: Long, enabled: Boolean)
