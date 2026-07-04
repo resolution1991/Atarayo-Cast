@@ -13,6 +13,16 @@ if(NOT DEFINED AIRCAST_DEPS_DIR)
 endif()
 message(STATUS "AirCast deps directory: ${AIRCAST_DEPS_DIR}")
 
+if(NOT EXISTS "${AIRCAST_DEPS_DIR}/UxPlay-master/lib"
+        OR NOT EXISTS "${AIRCAST_DEPS_DIR}/openssl-cmake-3"
+        OR NOT EXISTS "${AIRCAST_DEPS_DIR}/libplist"
+        OR NOT EXISTS "${AIRCAST_DEPS_DIR}/alac/codec")
+    message(FATAL_ERROR
+        "AIRCAST_DEPS_DIR is not configured or is incomplete: ${AIRCAST_DEPS_DIR}. "
+        "Set aircast.deps.dir in local.properties, pass -PaircastDepsDir=..., "
+        "or export AIRCAST_DEPS_DIR.")
+endif()
+
 set(UXPLAY_LIB ${AIRCAST_DEPS_DIR}/UxPlay-master/lib)
 
 # ---------- OpenSSL (built from source via openssl-cmake) ----------

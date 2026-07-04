@@ -42,6 +42,7 @@ class AirCastService : Service(), NativeCallbacks {
 
     companion object {
         private const val TAG = "AirCastService"
+        private const val VIDEO_RESET_FRAME_DROPPED = 1001
 
         fun start(context: Context) {
             val intent = Intent(context, AirCastService::class.java).apply {
@@ -329,10 +330,10 @@ class AirCastService : Service(), NativeCallbacks {
     // ---- NativeCallbacks ----
 
     override fun onVideoData(data: ByteBuffer, ntpTime: Long, isH265: Boolean) {
+        val size = data.limit()
         videoDecoder.decodeFrame(data, isH265, ntpTime)
 
         // Track debug stats
-        val size = data.limit()
         frameCount++
         frameBytes += size
         val now = System.currentTimeMillis()
@@ -452,9 +453,13 @@ class AirCastService : Service(), NativeCallbacks {
     }
 
     override fun onVideoReset(reason: Int) {
-        Log.i(TAG, "Video reset, reason=$reason")
-        // UxPlay RTP stream was reset. Flush pending frames but keep codec alive
-        // so it can re-sync when the next video stream arrives with CSD data.
+        if (reason == VIDEO_RESET_FRAME_DROPPED) {
+            Log.w(TAG, "Video reset requested after dropped reference frame")
+        } else {
+            Log.i(TAG, "Video reset, reason=$reason")
+        }
+        // RTP reset or local frame loss: flush pending frames but keep codec alive
+        // so it can re-sync when the next IDR frame arrives.
         videoDecoder.flush()
     }
 

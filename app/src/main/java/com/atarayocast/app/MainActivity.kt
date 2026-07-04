@@ -31,6 +31,7 @@ import com.atarayocast.app.databinding.ActivityMainBinding
 import com.atarayocast.app.service.AirCastService
 import com.atarayocast.app.ui.main.MainViewModel
 import com.atarayocast.app.util.Constants
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -54,6 +55,8 @@ class MainActivity : AppCompatActivity() {
     private var isCasting = false
     private var pipEnabled = true
     private var debugOverlayEnabled = false
+    private var keepScreenOnEnabled = false
+    private var keepScreenOnJob: Job? = null
 
     // Debug overlay updater
     private val debugHandler = Handler(Looper.getMainLooper())
@@ -103,17 +106,11 @@ class MainActivity : AppCompatActivity() {
 
         viewModel.initPrefs(AppPrefs(this))
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requestPermissions(
-                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
-                NOTIFICATION_PERMISSION_REQUEST
-            )
-        }
-
         setupSurface()
         setupButtons()
         setupTouchListener()
         observeViewModel()
+        startKeepScreenOnObserver()
 
         updateUI(Constants.ConnectionState.IDLE)
     }
@@ -397,16 +394,21 @@ class MainActivity : AppCompatActivity() {
 
     // ---- Keep screen on ----
 
-    private fun updateKeepScreenOn() {
-        lifecycleScope.launch {
-            val prefs = AppPrefs(this@MainActivity)
-            prefs.keepScreenOn.collect { keepOn ->
-                if (keepOn && isCasting) {
-                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                } else {
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
+    private fun startKeepScreenOnObserver() {
+        if (keepScreenOnJob != null) return
+        keepScreenOnJob = lifecycleScope.launch {
+            AppPrefs(this@MainActivity).keepScreenOn.collect { keepOn ->
+                keepScreenOnEnabled = keepOn
+                updateKeepScreenOn()
             }
+        }
+    }
+
+    private fun updateKeepScreenOn() {
+        if (keepScreenOnEnabled && isCasting) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 
@@ -611,6 +613,8 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         hideHandler.removeCallbacks(hideOverlayRunnable)
         debugHandler.removeCallbacks(debugRunnable)
+        keepScreenOnJob?.cancel()
+        keepScreenOnJob = null
     }
 
     override fun onRequestPermissionsResult(
@@ -620,7 +624,13 @@ class MainActivity : AppCompatActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == NOTIFICATION_PERMISSION_REQUEST) {
-            startService() // Start regardless
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                startService()
+            } else {
+                Log.w(TAG, "Notification permission denied; service start cancelled")
+            }
         }
     }
 }

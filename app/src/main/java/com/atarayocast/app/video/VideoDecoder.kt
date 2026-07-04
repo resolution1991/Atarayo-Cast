@@ -29,14 +29,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  *       CSD frame will trigger a fresh configuration.
  * - DirectByteBuffer pool for zero per-frame allocation
  * - NAL parsing with offset references (no temporary ByteArray copies)
- * - Latest-frame-wins pending frame (real-time streaming)
+ * - Ordered, bounded input queue. H.264/H.265 P/B frames depend on previous
+ *   reference frames, so dropping or replacing an arbitrary pending frame can
+ *   corrupt the reference chain and produce persistent macroblock artifacts.
  */
 class VideoDecoder(private val nativeBridge: NativeBridge) {
 
     companion object {
         private const val TAG = "VideoDecoder"
         private const val MAX_FRAME_SIZE = 4 * 1024 * 1024  // 4 MB
-        private const val VERBOSE = true
+        private const val VERBOSE = false
+        private const val STARTUP_OUTPUT_DROP_COUNT = 2
+        private const val MAX_PENDING_FRAMES = 8
     }
 
     // ---- Threading ----
@@ -52,12 +56,19 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
     private var currentWidth = 0
     private var currentHeight = 0
     private var codecConfigured = false
+    private var waitingForKeyFrame = true
+    private var startupOutputDropRemaining = 0
 
-    // ---- Pending frame (latest-wins for real-time streaming) ----
-    private var pendingFrame: ByteBuffer? = null
-    private var pendingFrameSize = 0
-    private var pendingFramePts = 0L
-    private var pendingIsKeyFrame = false  // IDR flag — never drop IDR frames
+    // ---- Pending frames in decode order ----
+    private data class PendingFrame(
+        val data: ByteBuffer,
+        val size: Int,
+        val pts: Long,
+        val isKeyFrame: Boolean
+    )
+
+    private val pendingFrames = ArrayDeque<PendingFrame>()
+    private var pendingFrameBytes = 0
 
     // ---- Available input buffer indices (saved when no frame is pending) ----
     // CRITICAL: In async mode, MediaCodec calls onInputBufferAvailable for each
@@ -169,9 +180,11 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
     fun stop() {
         handler.post {
             releaseCodec()
-            dropPendingFrame()
+            dropPendingFrames()
             currentWidth = 0
             currentHeight = 0
+            waitingForKeyFrame = true
+            startupOutputDropRemaining = 0
         }
     }
 
@@ -186,17 +199,22 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
      * (the Surface stays attached, codec stays configured).
      */
     fun flush() {
-        handler.post {
-            dropPendingFrame()
+        handler.postAtFrontOfQueue {
+            dropPendingFrames()
             availableInputIndices.clear()
+            waitingForKeyFrame = true
+            startupOutputDropRemaining = STARTUP_OUTPUT_DROP_COUNT
             try {
                 codec?.flush()
-                Log.i(TAG, "Codec flushed (MediaCodec.flush) — waiting for next IDR to re-sync")
+                codec?.start()
+                Log.i(TAG, "Codec flushed/restarted — waiting for next IDR to re-sync")
             } catch (e: Exception) {
                 Log.w(TAG, "MediaCodec.flush() failed, doing full reset", e)
                 releaseCodec()
                 currentWidth = 0
                 currentHeight = 0
+                waitingForKeyFrame = true
+                startupOutputDropRemaining = 0
             }
         }
     }
@@ -205,7 +223,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         released.set(true)
         handler.post {
             releaseCodec()
-            dropPendingFrame()
+            dropPendingFrames()
             surface = null
             handlerThread.quitSafely()
         }
@@ -217,11 +235,32 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         val mime = if (isH265) "video/hevc" else "video/avc"
         val size = data.limit()
 
+        if (!startsWithNalStartCode(data, size)) {
+            if (VERBOSE) Log.w(TAG, "Dropping invalid video frame without leading NAL start code (size=$size)")
+            nativeBridge.returnFrameBuffer(data)
+            return
+        }
+
+        val isKeyFrame = isIdrFrame(data, size, isH265)
+
         // If codec needs (re)configuration, extract CSD and configure
         if (!codecConfigured || currentMime != mime || currentWidth == 0 || currentHeight == 0) {
             // Cannot configure without a surface — drop frame and wait
             if (surface == null) {
                 if (VERBOSE) Log.d(TAG, "Cannot configure codec: no surface, dropping frame ($size bytes)")
+                nativeBridge.returnFrameBuffer(data)
+                return
+            }
+
+            val hasCsd = hasCodecConfig(data, size, isH265)
+            if (!isKeyFrame || !hasCsd) {
+                if (VERBOSE) {
+                    Log.i(
+                        TAG,
+                        "Waiting for clean sync frame before codec config " +
+                            "(isIDR=$isKeyFrame hasCSD=$hasCsd size=$size)"
+                    )
+                }
                 nativeBridge.returnFrameBuffer(data)
                 return
             }
@@ -241,129 +280,129 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             // data was lost — the decoder had CSD (SPS/PPS) but no first IDR
             // picture. All subsequent P-frames referenced the missing IDR,
             // causing macroblock artifacts until the next IDR frame arrived.
-            if (VERBOSE) Log.i(TAG, "Codec configured, feeding first frame to decoder (size=$size, isIDR=true)")
-            pendingFrame = data
-            pendingFrameSize = size
-            pendingFramePts = ntpTime
-            pendingIsKeyFrame = true  // first frame after config is always a keyframe
-            tryFeedPendingFrame()
+            Log.i(TAG, "Codec configured, queuing first IDR frame (size=$size)")
+            waitingForKeyFrame = false
+            startupOutputDropRemaining = STARTUP_OUTPUT_DROP_COUNT
+            enqueueFrame(data, size, ntpTime, isKeyFrame = true)
+            tryFeedPendingFrames()
             return
         }
 
-        // Detect if this is an IDR (key) frame.
-        // H.264: NAL type 5 (IDR). H.265: NAL types 16-21 (BLA/IDR/CRA).
-        val isKeyFrame = isIdrFrame(data, size, isH265)
-
-        // Replace any existing pending frame with latest (real-time streaming: latest wins).
-        // BUT: never drop a pending IDR frame — it is the reference for all
-        // subsequent P/B frames. Dropping it causes macroblock artifacts.
-        if (pendingFrame != null) {
-            if (pendingIsKeyFrame && !isKeyFrame) {
-                // Pending is IDR, incoming is not — feed the IDR first.
-                // Don't replace; try to feed it now.
-                tryFeedPendingFrame()
-                if (pendingFrame != null) {
-                    // Still can't feed (no input slots) — keep the IDR,
-                    // drop the incoming P-frame instead.
-                    dropCount++
-                    if (VERBOSE && dropCount % 30 == 0) {
-                        Log.w(TAG, "Dropped $dropCount frames (protected IDR, no slot for P-frame)")
-                    }
-                    nativeBridge.returnFrameBuffer(data)
-                    return
-                }
-            } else {
-                dropCount++
-                if (VERBOSE && dropCount % 60 == 0) {
-                    Log.w(TAG, "Dropped $dropCount frames (pending replaced)")
-                }
-                dropPendingFrame()
+        if (waitingForKeyFrame) {
+            if (!isKeyFrame) {
+                if (VERBOSE) Log.d(TAG, "Dropping non-IDR frame while waiting for decoder re-sync")
+                nativeBridge.returnFrameBuffer(data)
+                return
             }
+            waitingForKeyFrame = false
+            startupOutputDropRemaining = STARTUP_OUTPUT_DROP_COUNT
+            if (VERBOSE) Log.i(TAG, "Decoder re-sync IDR received; suppressing first outputs")
         }
 
-        pendingFrame = data
-        pendingFrameSize = size
-        pendingFramePts = ntpTime
-        pendingIsKeyFrame = isKeyFrame
-
-        // CRITICAL: Try to feed immediately if an input buffer index is available
-        // (saved by onInputBufferAvailable when no frame was pending at that time)
-        tryFeedPendingFrame()
+        if (!enqueueFrame(data, size, ntpTime, isKeyFrame)) return
+        tryFeedPendingFrames()
 
         if (VERBOSE && (feedCount % 30 == 0 || availableInputIndices.isEmpty())) {
             Log.i(TAG, "Frame queued: feedCount=$feedCount size=$size isIDR=$isKeyFrame" +
-                " availSlots=${availableInputIndices.size} pending=${pendingFrameSize}")
+                " availSlots=${availableInputIndices.size} pending=${pendingFrames.size}")
         }
     }
 
-    // ---- Internal: Feed pending frame to codec ----
+    // ---- Internal: Queue and feed pending frames to codec ----
 
     /**
-     * Attempt to feed the pending frame to the codec using a saved input buffer index.
+     * Queue a frame in decode order. If we fall behind far enough that the queue
+     * would grow unbounded, the only artifact-safe recovery is to discard queued
+     * reference state and wait for the next IDR frame.
+     */
+    private fun enqueueFrame(data: ByteBuffer, size: Int, pts: Long, isKeyFrame: Boolean): Boolean {
+        if (pendingFrames.size >= MAX_PENDING_FRAMES) {
+            dropCount += pendingFrames.size + 1
+            Log.w(
+                TAG,
+                "Decoder input queue overflow: dropping ${pendingFrames.size + 1} frames, " +
+                    "waiting for next IDR (fed=$feedCount rendered=$outputCount)"
+            )
+            dropPendingFrames()
+            waitingForKeyFrame = true
+            startupOutputDropRemaining = 0
+
+            if (!isKeyFrame) {
+                nativeBridge.returnFrameBuffer(data)
+                return false
+            }
+
+            waitingForKeyFrame = false
+            startupOutputDropRemaining = STARTUP_OUTPUT_DROP_COUNT
+            Log.i(TAG, "Queue overflow recovered on incoming IDR")
+        }
+
+        pendingFrames.addLast(PendingFrame(data, size, pts, isKeyFrame))
+        pendingFrameBytes += size
+        return true
+    }
+
+    /**
+     * Attempt to feed queued frames to the codec using saved input buffer indices.
      * Called both from handleFrame (when a frame arrives) and from onInputBufferAvailable
      * (when a new slot becomes available).
      */
-    private fun tryFeedPendingFrame() {
+    private fun tryFeedPendingFrames() {
         val c = codec ?: return
-        val data = pendingFrame ?: return
 
-        // If no available input indices, we can't feed right now
-        // (the codec will call onInputBufferAvailable when a slot opens)
-        if (availableInputIndices.isEmpty()) {
-            if (VERBOSE) Log.d(TAG, "tryFeed: no available input slots, frame queued (pendingLen=$pendingFrameSize)")
-            return
+        while (availableInputIndices.isNotEmpty() && pendingFrames.isNotEmpty()) {
+            val index = availableInputIndices.removeFirst()
+            feedFrameToCodec(c, index)
         }
-
-        val index = availableInputIndices.removeFirst()
-        feedFrameToCodec(c, index)
     }
 
     /**
-     * Feed the pending frame into the codec at the given input buffer index.
+     * Feed the next queued frame into the codec at the given input buffer index.
      * Returns the ByteBuffer to the native pool after copying.
      */
     private fun feedFrameToCodec(c: MediaCodec, index: Int) {
-        val data = pendingFrame
-        if (data == null) {
+        if (pendingFrames.isEmpty()) {
             // No pending frame — put the index back
             availableInputIndices.addFirst(index)
             return
         }
+        val frame = pendingFrames.removeFirst()
 
-        val size = pendingFrameSize
-        val pts = pendingFramePts
+        pendingFrameBytes -= frame.size
 
         try {
             val inputBuf = c.getInputBuffer(index)
             if (inputBuf == null) {
                 Log.w(TAG, "getInputBuffer returned null for index=$index")
-                dropPendingFrame()
+                nativeBridge.returnFrameBuffer(frame.data)
                 return
             }
 
             // Copy frame data into MediaCodec input buffer
             inputBuf.clear()
-            data.position(0)
-            data.limit(size)
-            inputBuf.put(data)
+            frame.data.position(0)
+            frame.data.limit(frame.size)
+            inputBuf.put(frame.data)
 
             // Set BUFFER_FLAG_KEY_FRAME for IDR frames so the codec knows
             // this is a sync point — helps with error recovery and prevents
             // macroblock artifacts from propagating after dropped frames.
-            val flags = if (pendingIsKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-            c.queueInputBuffer(index, 0, size, pts, flags)
+            val flags = if (frame.isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+            c.queueInputBuffer(index, 0, frame.size, frame.pts, flags)
             feedCount++
 
-            if (VERBOSE && (feedCount % 30 == 0 || pendingIsKeyFrame)) {
-                Log.i(TAG, "Fed frame #$feedCount to codec (size=$size, isIDR=$pendingIsKeyFrame" +
-                    ", availSlots=${availableInputIndices.size})")
+            if (VERBOSE && (feedCount % 30 == 0 || frame.isKeyFrame)) {
+                Log.i(TAG, "Fed frame #$feedCount to codec (size=${frame.size}, isIDR=${frame.isKeyFrame}" +
+                    ", availSlots=${availableInputIndices.size}, queued=${pendingFrames.size})")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error feeding frame to codec", e)
+            waitingForKeyFrame = true
+            startupOutputDropRemaining = 0
         }
 
-        // Frame consumed — return buffer to native pool and clear
-        dropPendingFrame()
+        // Frame consumed — return buffer to native pool
+        nativeBridge.returnFrameBuffer(frame.data)
     }
 
     // ---- Internal: Codec management (async callback mode) ----
@@ -459,15 +498,13 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
             // CRITICAL FIX: Save the index even if no frame is pending.
             // When a frame arrives later, it will use this saved index.
-            val data = pendingFrame
-            if (data != null) {
-                // Frame is ready — feed immediately
-                if (VERBOSE) Log.d(TAG, "onIBA: idx=$index feed pending(availSlots=${availableInputIndices.size})")
-                feedFrameToCodec(codec, index)
-            } else {
-                // No pending frame — save the index for later use
-                availableInputIndices.addLast(index)
-                if (VERBOSE) Log.d(TAG, "onIBA: idx=$index saved (queue=${availableInputIndices.size})")
+            availableInputIndices.addLast(index)
+            tryFeedPendingFrames()
+            if (VERBOSE) {
+                Log.d(
+                    TAG,
+                    "onIBA: idx=$index availSlots=${availableInputIndices.size} queued=${pendingFrames.size}"
+                )
             }
         }
 
@@ -484,6 +521,15 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             }
 
             try {
+                if (startupOutputDropRemaining > 0) {
+                    codec.releaseOutputBuffer(index, false)
+                    startupOutputDropRemaining--
+                    if (VERBOSE) {
+                        Log.i(TAG, "Suppressed startup output frame, remaining=$startupOutputDropRemaining")
+                    }
+                    return
+                }
+
                 // Phase A optimization: use timestamp API (API 21+) instead of
                 // boolean render flag. Passing 0L renders immediately (same as
                 // render=true), but uses the timestamp code path which is
@@ -505,6 +551,10 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
             Log.e(TAG, "Codec error: ${e.message}", e)
             codecConfigured = false
+            dropPendingFrames()
+            availableInputIndices.clear()
+            waitingForKeyFrame = true
+            startupOutputDropRemaining = 0
         }
 
         override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
@@ -513,14 +563,13 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
     }
 
     /**
-     * Return the pending frame buffer to the native pool and clear reference.
+     * Return all queued frame buffers to the native pool and clear references.
      */
-    private fun dropPendingFrame() {
-        pendingFrame?.let { nativeBridge.returnFrameBuffer(it) }
-        pendingFrame = null
-        pendingFrameSize = 0
-        pendingFramePts = 0L
-        pendingIsKeyFrame = false
+    private fun dropPendingFrames() {
+        while (pendingFrames.isNotEmpty()) {
+            nativeBridge.returnFrameBuffer(pendingFrames.removeFirst().data)
+        }
+        pendingFrameBytes = 0
     }
 
     // ---- IDR detection ----
@@ -564,6 +613,63 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
                         val nalType = firstByte and 0x1F
                         if (nalType == 5) return true  // IDR slice
                     }
+                }
+                i = nalStart
+            } else {
+                i++
+            }
+        }
+        return false
+    }
+
+    private fun startsWithNalStartCode(buffer: ByteBuffer, size: Int): Boolean {
+        if (size < 4) return false
+        if (buffer.get(0) != 0.toByte() || buffer.get(1) != 0.toByte()) return false
+        if (buffer.get(2) == 1.toByte()) return true
+        return size > 3 && buffer.get(2) == 0.toByte() && buffer.get(3) == 1.toByte()
+    }
+
+    /**
+     * Codec configuration must come from the same access unit as a key frame at
+     * stream start. Configuring from a P-frame or from an invalid frame lets the
+     * decoder build references from incomplete state, which is the usual source
+     * of startup macroblock artifacts.
+     */
+    private fun hasCodecConfig(buffer: ByteBuffer, size: Int, isH265: Boolean): Boolean {
+        if (size < 4) return false
+
+        var hasVps = !isH265
+        var hasSps = false
+        var hasPps = false
+        var i = 0
+
+        while (i < size - 3) {
+            if (buffer.get(i) == 0.toByte() && buffer.get(i + 1) == 0.toByte()) {
+                val nalStart: Int
+                if (i + 2 < size && buffer.get(i + 2) == 1.toByte()) {
+                    nalStart = i + 3
+                } else if (i + 3 < size && buffer.get(i + 2) == 0.toByte() && buffer.get(i + 3) == 1.toByte()) {
+                    nalStart = i + 4
+                } else {
+                    i += 2
+                    continue
+                }
+
+                if (nalStart < size) {
+                    val firstByte = buffer.get(nalStart).toInt() and 0xFF
+                    if (isH265) {
+                        when ((firstByte shr 1) and 0x3F) {
+                            32 -> hasVps = true
+                            33 -> hasSps = true
+                            34 -> hasPps = true
+                        }
+                    } else {
+                        when (firstByte and 0x1F) {
+                            7 -> hasSps = true
+                            8 -> hasPps = true
+                        }
+                    }
+                    if (hasVps && hasSps && hasPps) return true
                 }
                 i = nalStart
             } else {
@@ -636,18 +742,18 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         val units = mutableListOf<NalRef>()
         var i = 0
         val len = data.size
-        while (i < len) {
+        while (i < len - 2) {
             val startCodeLen = when {
-                i + 3 <= len && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                i + 3 < len && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
                     data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte() -> 4
-                i + 2 <= len && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                i + 2 < len && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
                     data[i + 2] == 1.toByte() -> 3
                 else -> { i++; continue }
             }
             val start = i + startCodeLen
             var end = len
             if (start < len) {
-                for (j in start until len) {
+                for (j in start until len - 2) {
                     val b = data[j]
                     if (b == 0.toByte() && j + 1 < len && data[j + 1] == 0.toByte()) {
                         if (j + 2 < len && data[j + 2] == 1.toByte()) {
@@ -696,5 +802,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         currentMime = null
         codecConfigured = false
         availableInputIndices.clear()
+        waitingForKeyFrame = true
+        startupOutputDropRemaining = 0
     }
 }

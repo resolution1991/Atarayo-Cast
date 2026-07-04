@@ -38,12 +38,15 @@ Android 设备作为 AirPlay 接收端和 DLNA Media Renderer，接收来自 mac
 - **开机自启** — 支持 BootReceiver 开机自动启动服务
 - **通知栏控制** — 前台服务通知，含停止按钮，点击回到应用
 
-### 性能优化 (v0.2 新增)
+### 性能优化 (v0.2 / v0.3)
 
 - **DirectByteBuffer 帧池** — 24 x 4MB 预分配缓冲区（v0.1: 8 个），零 per-frame 内存分配
 - **MediaCodec 异步回调** — 无轮询，codec 就绪时自动拉取帧
 - **IDR 关键帧保护** — Kotlin + C 双层保护，IDR 帧池满时 sem_timedwait 等待 15ms，非 IDR 帧立即丢弃
-- **首帧 IDR 数据保留** — 配置 codec 后首帧（SPS+PPS+IDR）同时喂入解码器，消除初始伪影
+- **顺序有界解码队列** — Kotlin 侧最多缓存 8 帧并保持 decode order，避免覆盖参考帧导致持续宏块伪影
+- **IDR 重同步门控** — 队列溢出、native 帧池丢帧或 codec flush 后等待下一帧 IDR，再恢复渲染
+- **干净首帧启动** — codec 未配置前只接受带 CSD 参数集和 IDR 的 Annex-B 帧，抑制启动期前 2 个输出缓冲
+- **60fps 协商** — 同时设置 AirPlay `refreshRate` 和 `maxFPS`，允许发送端最高按 60fps 推流
 - **NAL 零拷贝解析** — 使用偏移引用代替 ByteArray 复制
 - **色彩元数据** — KEY_COLOR_STANDARD=BT.709 / KEY_COLOR_RANGE=LIMITED / KEY_COLOR_TRANSFER=SDR_VIDEO
 - **解码器调度** — KEY_PRIORITY=0 (实时) / KEY_OPERATING_RATE=120 / KEY_FRAME_RATE=60
@@ -118,7 +121,7 @@ Android 设备作为 AirPlay 接收端和 DLNA Media Renderer，接收来自 mac
 | **原生** | `android_raop_callbacks.c` | RAOP 回调 → JNI → Kotlin，帧池管理，IDR 保护，JNI 方法缓存 |
 | **原生** | `android_dnssd_shim.c` | DNS-SD TXT 记录构建（适配 Android NsdManager） |
 
-### 视频管线 (v0.2 优化)
+### 视频管线 (v0.3 优化)
 
 ```
 macOS/iOS
@@ -128,6 +131,7 @@ UxPlay RAOP (C)
   │ _video_process callback
   │ ↓ IDR 检测 (_is_idr_frame)
   │ ↓ IDR: sem_timedwait(15ms)  非 IDR: sem_trywait(立即丢弃)
+  │ ↓ 池满丢帧: onVideoReset(1001) + 抑制非 IDR 直到下一帧 IDR
   ▼
 Frame Pool (24 x 4MB DirectByteBuffer)
   │ memcpy → ByteBuffer (JNI 方法 ID 已缓存)
@@ -137,15 +141,16 @@ NativeCallbacks.onVideoData() [Kotlin]
   ▼
 VideoDecoder.handleFrame()
   │ 首帧: configureCodec(CSD) → 喂入首帧 IDR 数据
-  │ 后续: IDR 检测 → 保护 IDR 不被丢弃
-  │      → BUFFER_FLAG_KEY_FRAME 标志
+  │ 后续: IDR 检测 → 顺序有界队列 (最多 8 帧)
+  │      → 队列溢出/flush 后等待下一帧 IDR 重同步
+  │      → IDR 使用 BUFFER_FLAG_KEY_FRAME 标志
   ▼
 MediaCodec async (THREAD_PRIORITY_DISPLAY)
   │ KEY_PRIORITY=0, KEY_OPERATING_RATE=120
   │ KEY_COLOR_STANDARD=BT.709, KEY_COLOR_RANGE=LIMITED
   │ KEY_MAX_WIDTH=3840, KEY_MAX_HEIGHT=2160 (自适应)
   │ KEY_LOW_LATENCY=1 (API 30+)
-  │ onInputBufferAvailable → feed pendingFrame (availableInputIndices 队列)
+  │ onInputBufferAvailable → 按 decode order 喂入 queued frames
   │ onOutputBufferAvailable → releaseOutputBuffer(0L) → Surface
   ▼
 SurfaceView (硬件渲染)
@@ -153,6 +158,10 @@ SurfaceView (硬件渲染)
   ▼
 nativeBridge.returnFrameBuffer() → 帧归还池
 ```
+
+> 60fps 协商：Android 侧通过 `nativeSetDisplaySize()` 同时写入 `refreshRate` 和
+> `maxFPS`。`maxFPS=60` 只是允许 AirPlay client 最高 60fps 推流，最终帧率仍由
+> 发送端、网络和编码策略决定。
 
 ### 音频管线
 
@@ -203,7 +212,7 @@ NativeCallbacks.onAudioData(data, ct) [Kotlin]
 
 ### 依赖准备
 
-原生依赖库需要放在 `AIRCAST_DEPS_DIR` 指定的目录（默认为项目内 `third_party/`，可通过 CMake 参数覆盖）：
+原生依赖库需要放在 `AIRCAST_DEPS_DIR` 指定的目录（未配置时默认为 `app/src/main/cpp/third_party/`，可通过 Gradle/CMake 参数覆盖）：
 
 ```
 aircast-deps/
@@ -211,6 +220,21 @@ aircast-deps/
 ├── openssl-cmake-3/      # OpenSSL CMake 构建脚本
 ├── libplist/             # libplist 源码 (src/ + libcnary/ + include/)
 └── alac/                 # Apple ALAC 解码器 (codec/ 目录)
+```
+
+依赖路径可用以下任一方式配置，优先级从高到低：
+
+```properties
+# local.properties（推荐，本机私有，不提交）
+aircast.deps.dir=/absolute/path/to/aircast-deps
+```
+
+```bash
+# 或通过 Gradle 参数
+./gradlew assembleDebug -PaircastDepsDir=/absolute/path/to/aircast-deps
+
+# 或通过环境变量
+export AIRCAST_DEPS_DIR=/absolute/path/to/aircast-deps
 ```
 
 ### 一键构建
@@ -438,6 +462,7 @@ Atarayo-Cast/
 |------|------|------|
 | v0.1 | 2026-07-04 | 基线版本：AirPlay + DLNA + 全部功能 |
 | v0.2 | 2026-07-04 | 视频优化 + 音量控制 + UI 增强 + Bug 修复 |
+| v0.3 | 2026-07-04 | 60fps 协商 + 启动/持续伪影修复 + 开发环境可移植性 |
 
 ---
 

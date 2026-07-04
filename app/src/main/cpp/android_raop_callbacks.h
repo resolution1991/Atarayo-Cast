@@ -46,6 +46,7 @@ typedef struct {
     int frame_pool_free[FRAME_POOL_SIZE];       /* Stack of free indices */
     int frame_pool_head;                        /* Top of free stack */
     int frame_pool_dropped;                     /* Frames dropped due to pool full */
+    int frame_pool_needs_resync;                /* Drop non-IDR frames until next IDR after loss */
     pthread_mutex_t frame_pool_lock;            /* Protects free stack */
     sem_t frame_pool_sem;                       /* Counting semaphore for available buffers */
     int frame_pool_initialized;                 /* 1 when pool is ready */

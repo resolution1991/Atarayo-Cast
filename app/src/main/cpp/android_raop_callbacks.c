@@ -20,6 +20,8 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+#define RESET_REASON_FRAME_DROPPED 1001
+
 /* TLS key to track whether we called AttachCurrentThread on this thread */
 static pthread_key_t _jni_attach_key;
 static pthread_once_t _jni_attach_key_once = PTHREAD_ONCE_INIT;
@@ -86,6 +88,19 @@ static int _is_idr_frame(const uint8_t *data, int len, int is_h265) {
     return 0;
 }
 
+static void _request_video_resync(android_callback_ctx_t *ctx, JNIEnv *env, const char *reason) {
+    if (ctx->frame_pool_needs_resync) return;
+
+    ctx->frame_pool_needs_resync = 1;
+    LOGW("_video_process: %s; requesting decoder resync at next IDR", reason);
+    (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_video_reset,
+                           (jint)RESET_REASON_FRAME_DROPPED);
+    if ((*env)->ExceptionCheck(env)) {
+        LOGE("_video_process: Java exception in onVideoReset callback!");
+        (*env)->ExceptionClear(env);
+    }
+}
+
 /* --- Frame buffer pool --- */
 
 int android_frame_pool_init(android_callback_ctx_t *ctx, JNIEnv *env,
@@ -103,6 +118,8 @@ int android_frame_pool_init(android_callback_ctx_t *ctx, JNIEnv *env,
         (*env)->DeleteLocalRef(env, buf);
     }
     ctx->frame_pool_head = count;
+    ctx->frame_pool_dropped = 0;
+    ctx->frame_pool_needs_resync = 0;
     ctx->frame_pool_initialized = 1;
 
     LOGI("Frame buffer pool initialized: %d buffers, %d bytes each",
@@ -214,6 +231,8 @@ void android_callbacks_init(android_callback_ctx_t *ctx, JNIEnv *env, jobject ca
 
     /* Frame pool not yet initialized */
     ctx->frame_pool_initialized = 0;
+    ctx->frame_pool_dropped = 0;
+    ctx->frame_pool_needs_resync = 0;
     memset(ctx->frame_buffers, 0, sizeof(ctx->frame_buffers));
     memset(ctx->frame_addrs, 0, sizeof(ctx->frame_addrs));
 
@@ -324,13 +343,22 @@ static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data
     if (!env) return;
 
     _vp_count++;
-    if (_vp_count % 30 == 1) {
+    if (_vp_count % 300 == 1) {
         LOGI("_video_process: frame #%d size=%d is_h265=%d nal_count=%d",
              _vp_count, data->data_len, data->is_h265, data->nal_count);
     }
 
     /* Check if this is an IDR (key) frame — never drop these */
     int is_idr = _is_idr_frame(data->data, data->data_len, data->is_h265);
+
+    if (ctx->frame_pool_needs_resync && !is_idr) {
+        ctx->frame_pool_dropped++;
+        if (ctx->frame_pool_dropped % 60 == 1) {
+            LOGW("_video_process: suppressing non-IDR while waiting for IDR resync, dropped=%d",
+                 ctx->frame_pool_dropped);
+        }
+        return;
+    }
 
     /* Acquire a free buffer from the pool.
      * For IDR frames: use timed wait (15ms) to avoid dropping key frames,
@@ -343,7 +371,12 @@ static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data
             ctx->frame_pool_dropped++;
             LOGW("_video_process: IDR frame dropped (pool full, timed out 15ms) dropped=%d",
                  ctx->frame_pool_dropped);
+            _request_video_resync(ctx, env, "IDR frame dropped because frame pool is full");
             return;
+        }
+        if (ctx->frame_pool_needs_resync) {
+            LOGI("_video_process: IDR received; clearing native resync gate");
+            ctx->frame_pool_needs_resync = 0;
         }
     } else {
         buf_idx = _frame_pool_acquire(ctx);
@@ -353,6 +386,7 @@ static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data
                 LOGW("_video_process: pool full, dropped=%d (Java decoder too slow)",
                      ctx->frame_pool_dropped);
             }
+            _request_video_resync(ctx, env, "non-IDR frame dropped because frame pool is full");
             return;
         }
     }
@@ -382,6 +416,9 @@ static void _conn_init(void *cls) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
     JNIEnv *env = _get_env(ctx);
     if (!env) return;
+    ctx->frame_pool_dropped = 0;
+    ctx->frame_pool_needs_resync = 0;
+    _vp_count = 0;
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_conn_init);
 }
 

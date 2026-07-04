@@ -39,6 +39,7 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var swBootStart: MaterialSwitch
     private lateinit var swPip: MaterialSwitch
     private lateinit var swDebug: MaterialSwitch
+    private var selectedResolutionKey: String = Constants.Resolution.AUTO.key
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,10 +67,13 @@ class SettingsActivity : AppCompatActivity() {
         // Load current values
         lifecycleScope.launch {
             tvDeviceName.text = prefs.deviceName.first()
-            val res = Constants.Resolution.fromKey(prefs.resolution.first())
+            selectedResolutionKey = prefs.resolution.first()
+            val res = Constants.Resolution.fromKey(selectedResolutionKey)
             tvResolution.text = res.displayLabel
             swH265.isChecked = prefs.h265Enabled.first()
-            swAdaptiveRes.isChecked = prefs.adaptiveResolution.first()
+            val adaptiveRes = prefs.adaptiveResolution.first()
+            swAdaptiveRes.isChecked = adaptiveRes
+            setResolutionRowEnabled(!adaptiveRes)
             swKeepScreenOn.isChecked = prefs.keepScreenOn.first()
             swFullscreenDefault.isChecked = prefs.fullscreenDefault.first()
             swPin.isChecked = prefs.pinEnabled.first()
@@ -85,13 +89,14 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         findViewById<android.view.View>(R.id.rowResolution).setOnClickListener {
-            showResolutionDialog()
+            if (!swAdaptiveRes.isChecked) {
+                showResolutionDialog()
+            }
         }
 
         swAdaptiveRes.setOnCheckedChangeListener { _, checked ->
             lifecycleScope.launch { prefs.setAdaptiveResolution(checked) }
-            findViewById<android.view.View>(R.id.rowResolution).isEnabled = !checked
-            tvResolution.isEnabled = !checked
+            setResolutionRowEnabled(!checked)
         }
 
         swH265.setOnCheckedChangeListener { _, checked ->
@@ -156,19 +161,25 @@ class SettingsActivity : AppCompatActivity() {
     private fun showResolutionDialog() {
         val resolutions = Constants.Resolution.entries.filter { it != Constants.Resolution.AUTO }
         val items = resolutions.map { it.displayLabel }.toTypedArray()
-        val current = Constants.Resolution.fromKey(tvResolution.text.toString())
+        val current = Constants.Resolution.fromKey(selectedResolutionKey)
         val checked = resolutions.indexOfFirst { it.key == current.key }
 
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.settings_resolution))
             .setSingleChoiceItems(items, checked) { dialog, which ->
                 val res = resolutions[which]
+                selectedResolutionKey = res.key
                 tvResolution.text = res.displayLabel
                 lifecycleScope.launch { prefs.setResolution(res.key) }
                 dialog.dismiss()
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private fun setResolutionRowEnabled(enabled: Boolean) {
+        findViewById<android.view.View>(R.id.rowResolution).isEnabled = enabled
+        tvResolution.isEnabled = enabled
     }
 
     private fun showPinDialog() {

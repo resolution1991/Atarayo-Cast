@@ -1,6 +1,59 @@
 # 开发日志
 
-记录 Atarayo-Cast 从项目创建到 v0.1 基线的完整开发过程。
+记录 Atarayo-Cast 从项目创建到 v0.3 基线的完整开发过程。
+
+---
+
+## v0.3 — 60fps 协商 + 伪影修复基线 (2026-07-04)
+
+### AirPlay 60fps 协商修复
+
+**问题：** 安卓端请求 `2160x1350@60fps`，但 AirPlay 发送端实际仍可能按 30fps 输出。
+
+**原理分析：**
+- UxPlay 的 display plist 同时包含 `refreshRate` 和 `maxFPS`。
+- 现有 Android bridge 只设置了 `refreshRate=fps`，没有设置 `maxFPS`；而 UxPlay 默认 `maxFPS=30`。
+- `refreshRate=60` 表示显示刷新率，`maxFPS=60` 才是允许 AirPlay client 最高按 60fps 推流的关键上限。该值仍是 advisory，不能强制发送端一定输出 60fps。
+
+**修复：**
+- `nativeSetDisplaySize()` 现在同时写入 `width`、`height`、`refreshRate`、`maxFPS`。
+- 对 `fps` 做 1..255 的安全夹取，避免写入 UxPlay `uint8_t` 配置时溢出。
+- 增加 `nativeSetDisplaySize` 日志，便于确认实际协商参数。
+
+### 持续投屏块状压缩伪影
+
+**问题：** 启动后仍会在持续投屏过程中偶发块状压缩伪影。
+
+**原理分析：**
+- H.264/H.265 是参考帧编码。当前 Kotlin 侧使用“latest frame wins”的单帧 pending 策略，非 IDR 帧积压时会被新帧覆盖；native 帧池满时也会直接丢非 IDR 帧。
+- 一旦中间任意参考帧丢失，后续 P/B 帧会基于缺失参考继续解码，错误会持续传播到下一帧 IDR，表现为持续或反复出现的宏块/马赛克伪影。
+
+**修复：**
+- `VideoDecoder` 输入从单帧 pending 改为最多 8 帧的顺序有界队列，保持解码输入顺序，不再用新帧覆盖旧 P 帧。
+- Kotlin 队列溢出时丢弃积压帧并进入“等待 IDR”状态；在下一帧 IDR 到来前丢弃非 IDR，避免继续渲染损坏参考链。
+- native 帧池一旦发生丢帧，会通过 `onVideoReset(1001)` 通知 Kotlin 立即 flush；native 同时设置重同步门控，在下一帧 IDR 成功送入 Java 前抑制所有非 IDR。
+- 异步 `MediaCodec.flush()` 后补充 `start()`，确保 flush 后继续收到 input buffer 回调。
+- 关闭 `VideoDecoder` 逐帧 verbose 日志，native 视频帧采样日志从每 30 帧降到每 300 帧，降低解码线程调度压力。
+
+### 启动阶段块状压缩伪影
+
+**问题：** 几乎每次 AirPlay 投屏刚出现画面时，都会短暂出现块状压缩伪影。
+
+**原理分析：**
+- H.264/H.265 的 P/B 帧依赖前面的 IDR 关键帧作为参考。若解码器在启动阶段先收到无效帧、P 帧，或未同时具备 VPS/SPS/PPS 参数集和 IDR，就可能用不完整参考帧建立解码状态。
+- MediaCodec 即使已经收到 CSD 和 IDR，启动后的前几个输出缓冲仍可能处在同步和 surface 呈现过渡阶段。直接渲染这些缓冲，会把短暂宏块伪影显示给用户。
+
+**修复：**
+- `VideoDecoder.handleFrame()` 在 codec 未配置时，只接受“带 CSD 参数集 + IDR”的干净同步帧，其他启动帧直接丢弃并归还 native 帧池。
+- 增加无效 Annex-B 帧过滤：视频帧必须以 `00 00 01` 或 `00 00 00 01` start code 开头，否则丢弃，避免 UxPlay 标记的无效包污染解码器。
+- `flush()` / 重同步后等待下一帧 IDR；等待期间丢弃非 IDR 帧。
+- codec 配置或重同步后，抑制前 2 个 MediaCodec 输出缓冲，不渲染到 Surface，避免启动同步期的脏画面闪现。
+- 修复 `parseNalRefs()` 边界条件，避免短帧尾部 start code 扫描越界。
+
+### 测试基准
+
+- 当前项目端到端测试以 Lenovo YT-K606F 真机无线调试为主。
+- Android Studio 模拟器仅用于安装、启动、设置页、权限和生命周期烟测，不作为 AirPlay/DLNA 可用性判断依据。
 
 ---
 
@@ -67,7 +120,7 @@ typedef struct {
 | `nativeStart` | 启动 RAOP HTTPD，注册 DNS-SD 记录 |
 | `nativeStop` | 停止 HTTPD，注销 DNS-SD |
 | `nativeDestroy` | 销毁帧池/RAOP/dnssd |
-| `nativeSetDisplaySize` | 设置 width/height/refreshRate plist |
+| `nativeSetDisplaySize` | 设置 width/height/refreshRate/maxFPS plist |
 | `nativeSetH265Enabled` | H.265 标志 + DNS-SD feature bit 42 |
 | `nativeSetCodecs` | ALAC/AAC 编解码器声明 |
 | `nativeSetPinAuth` | PIN 认证（raop_set_plist） |
@@ -721,6 +774,7 @@ enum class Resolution(val key: String, val width: Int, val height: Int, val fps:
 |------|------|------|
 | v0.1 | 2026-07-04 | 基线版本：AirPlay + DLNA + 全部功能 |
 | v0.2 | 2026-07-04 | 视频优化 + 音量控制 + UI 增强 + Bug 修复 |
+| v0.3 | 2026-07-04 | 60fps 协商 + 启动/持续伪影修复 + 开发环境可移植性 |
 
 ---
 

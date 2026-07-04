@@ -101,6 +101,7 @@ Java_com_atarayocast_app_bridge_NativeBridge_nativeInit(
         if (keyfile_c) env->ReleaseStringUTFChars(keyFile, keyfile_c);
         if (name_c) env->ReleaseStringUTFChars(name, name_c);
         raop_destroy(ctx->raop);
+        android_callbacks_destroy(&ctx->cb_ctx, env);
         free(ctx);
         return 0;
     }
@@ -115,6 +116,12 @@ Java_com_atarayocast_app_bridge_NativeBridge_nativeInit(
     int ret = raop_init2(ctx->raop, nohold ? 1 : 0, device_id, keyfile_c);
     if (ret < 0) {
         LOGE("raop_init2 failed: %d", ret);
+        env->ReleaseStringUTFChars(keyFile, keyfile_c);
+        env->ReleaseStringUTFChars(name, name_c);
+        raop_destroy(ctx->raop);
+        android_callbacks_destroy(&ctx->cb_ctx, env);
+        free(ctx);
+        return 0;
     }
 
     if (requirePin) {
@@ -253,9 +260,15 @@ Java_com_atarayocast_app_bridge_NativeBridge_nativeSetDisplaySize(
     server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
     if (!ctx || !ctx->raop) return;
 
+    int safe_fps = fps;
+    if (safe_fps < 1) safe_fps = 30;
+    if (safe_fps > 255) safe_fps = 255;
+
     raop_set_plist(ctx->raop, "width", w);
     raop_set_plist(ctx->raop, "height", h);
-    raop_set_plist(ctx->raop, "refreshRate", fps);
+    raop_set_plist(ctx->raop, "refreshRate", safe_fps);
+    raop_set_plist(ctx->raop, "maxFPS", safe_fps);
+    LOGI("nativeSetDisplaySize: %dx%d refreshRate=%d maxFPS=%d", w, h, safe_fps, safe_fps);
 }
 
 /* Returns a HashMap<String, String> of TXT records */
