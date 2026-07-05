@@ -15,6 +15,7 @@
 
     <string name="btn_start">启动服务</string>
     <string name="btn_stop">停止服务</string>
+    <string name="btn_stop_casting">终止投屏</string>
     <string name="btn_settings">设置</string>
     <string name="btn_refresh">刷新画面</string>
     <string name="no_input">当前无投屏输入</string>

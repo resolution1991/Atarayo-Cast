@@ -5,17 +5,20 @@
 ## 当前状态
 
 - 项目仓库：`https://github.com/resolution1991/Atarayo-Cast.git`
-- 本地源码目录：`/Users/algernon/Documents/AirCast`
-- 注意：`/Users/algernon/Documents/Cast-App` 当前只有一个空 Git 仓库，没有源码、提交或 remote。
+- 本地源码目录：`/Users/algernon/Documents/Cast-App`
+- 迁移记录：2026-07-05 已将原 `/Users/algernon/Documents/AirCast` 的源码、Git 历史、标签和 `origin` 远端迁入本 Codex 项目目录；后续以 `Cast-App` 作为默认工作目录。
 - 当前分支：`main`
-- 当前基线目标：`v0.3.1`（本地 git 提交和 tag 固化，不发布到 GitHub）。
+- 当前基线目标：`v0.4.0`（DLNA 可用性重构、接收端本地控制、新应用图标，发布到 GitHub）。
 - v0.3 包含 Codex 修复：权限回调误启动、KeepScreenOn collector 累积、native 初始化失败处理、依赖路径配置、版本号对齐、设置页分辨率选中态、AirPlay 启动阶段块状伪影、持续投屏参考帧丢失重同步、AirPlay `maxFPS` 60fps 协商。
 - 版本定位：Android 设备作为 AirPlay 接收端和 DLNA Media Renderer。
-- 已确认构建产物：`/Users/algernon/Documents/AirCast/app/build/outputs/apk/debug/app-debug.apk`
+- 已确认构建产物：`/Users/algernon/Documents/Cast-App/app/build/outputs/apk/debug/app-debug.apk`
 
 ## v0.3 后本地修复记录
 
-- `v0.3.1` 本地节点范围：固化 2560x1600 黑屏修复、H.265 强制协商实验及失败保护、Apple TV sourceVersion 编译覆盖实验、设置页服务运行中锁定规则；该节点仅创建本地 commit/tag，不推送 GitHub。
+- 2026-07-05 DLNA 视频黑屏修复：用户复测后确认 DLNA 音频已能接收、视频仍黑屏。日志显示 `SetAVTransportURI`/`Play`/seek/音量均已生效，进度和总时长持续更新，且系统为视频配置了 `1280x720` nativeWindow，说明拉流与解码链路已走通；进一步启动日志确认 Activity 绑定服务时调用 `setSurface`/`setPlayerView` 早于 `DlnaMediaPlayer` 创建，原 `DlnaManager` 未保存 pending PlayerView，播放器创建后没有实际挂载播放器视图。已新增独立 `androidx.media3.ui.PlayerView` 作为 DLNA 视频输出，AirPlay 继续使用原 `SurfaceView`；`DlnaManager` 缓存 pending `Surface`/`PlayerView` 并在播放器初始化后补挂；`MainActivity` 根据广播的 `EXTRA_PROTOCOL` 在 AirPlay Surface 与 DLNA PlayerView 间切换；`DlnaMediaPlayer` 新增视频尺寸和首帧渲染日志；GENA `NOTIFY` 从 `HttpURLConnection` 改为原始 socket，避免 Android 拒绝 `NOTIFY` 方法。后续复测仍黑屏时，日志和控件树确认 UI 已显示 `dlnaPlayerView`，但 `PlayerView` 内部 `exo_shutter` 仍覆盖，且没有 `Video size` / `Rendered first DLNA video frame`；发现 `setPlayerView()` 中错误地在 `view.player = player` 之后调用 `player.clearVideoSurface()`，等于把 PlayerView 刚绑定好的视频 Surface 清掉。已改为先清旧 Surface、再绑定 `view.player = player`。用户后续复测确认“画面能看到了”。
+- 2026-07-05 DLNA 第二轮系统性重构：用户复测后确认仅设备名称修复生效，其余仍表现为接收端无响应、推送后进度 00:00。本轮 review 确认一个关键链路问题是 `network_security_config.xml` 只允许 `localhost/.local` 明文 HTTP，而 DLNA 控制端常推送 `http://192.168.x.x/...` 局域网媒体 URL，接收端会被 Android 明文策略拦截拉流；已改为允许明文流量。协议层补齐常见控制端预检/兼容动作：`PrepareForConnection`、`ConnectionComplete`、`SetNextAVTransportURI`、`GetDeviceCapabilities`、`GetCurrentTransportActions`、`SetPlayMode`、`ListPresets`、`SelectPreset`，并支持 `HEAD` 查询 SCPD/description。播放层将 ExoPlayer 位置、时长、状态、错误缓存到主线程维护，SOAP 查询只读缓存，避免 UPnP 工作线程直接读 ExoPlayer；`GetTransportInfo`/LastChange 返回真实 `OK` 或 `ERROR_OCCURRED`；播放状态异步变化时主动推 GENA 事件；`SetAVTransportURI` 后启用兼容性自动播放，覆盖只发 URI 不再发 `Play` 的控制端。
+- 2026-07-05 DLNA 可用性修复：针对实测“接收端无响应、投屏端显示名称不是用户自定义名称、投屏后进度一直 00:00”，已将 DLNA friendlyName 改为使用设置中的设备名称；将 DLNA UDN 改为基于 Android ID 的稳定 UUID；统一 SSDP `LOCATION` 使用 UPnP HTTP 服务实际 host；修复 HTTP/SOAP 请求体按字符读取导致带中文/复杂 metadata 时可能超时无响应的问题；增强 SOAP 参数解析以支持命名空间和 XML entity 反转义；从 DIDL-Lite metadata 提取标题；`GetTransportInfo`/GENA LastChange 改为回读 ExoPlayer 真实播放状态；新增 GENA 订阅初始事件；DLNA 播放状态会同步到前台服务通知和主界面状态；关闭当前连接时同时停止 DLNA 播放。已通过 `./build.sh` 构建并安装到 `192.168.31.212:45523`，仍需用真实 DLNA 控制端复测发现、推送、进度、暂停、seek、音量和停止。
+- `v0.4.0` 发布范围：固化 DLNA 发现/控制/视频显示/接收端本地控制/终止投屏链路，以及 APK launcher 新图标；Android 元数据对齐为 `versionName = "0.4.0"`、`versionCode = 5`。
 - 手动选择 `2560x1600` 后 Mac 端显示投屏成功但 Android 端黑屏：已将视频帧池和 MediaCodec 输入上限从 4MB 提升到 6MB，避免较高分辨率首个 CSD/IDR 帧在 native 或 Kotlin 层被判定过大后丢弃。
 - 同步将手动/自适应协商出来的目标分辨率预先写入 `VideoDecoder`，避免首帧早于 `onVideoSize()` 到达时用旧的 `1920x1080` fallback 配置 MediaCodec。
 - 新增默认关闭的实验设置项 `强行使用 H.265 编码`：开启后服务端会强制打开 HEVC 能力声明，并在 native `video_set_codec` 协商回调中拒绝非 H.265 codec。该选项用于验证 Mac/iOS 端是否会改用 HEVC；若发送端仍只给 H.264，投屏会连接失败或被重置，属于预期兼容性风险。
@@ -86,14 +89,14 @@ aircast.deps.dir=/Users/algernon/WorkBuddy/2026-07-03-20-28-39/aircast-deps
 推荐使用项目脚本：
 
 ```bash
-cd /Users/algernon/Documents/AirCast
+cd /Users/algernon/Documents/Cast-App
 ./build.sh
 ```
 
 安装到已连接设备：
 
 ```bash
-cd /Users/algernon/Documents/AirCast
+cd /Users/algernon/Documents/Cast-App
 ./build.sh install
 ```
 
@@ -151,6 +154,16 @@ adb -s 192.168.31.212:45523 logcat -s AirCastService MainActivity NativeBridge V
 - 修复：`nativeSetDisplaySize(width, height, fps)` 同时写入 `refreshRate=fps` 和 `maxFPS=fps`，并在 native 日志输出实际参数。
 - 边界：`maxFPS=60` 是 advisory，不保证发送端一定输出 60fps；如果仍为 30fps，下一步应验证发送端型号、请求分辨率、网络条件和 AirPlay 协商日志。
 
+## DLNA 本地控制与发现兼容性
+
+- 2026-07-05 修复方向：DLNA 投屏期间改用独立 `PlayerView` 承载 ExoPlayer 视频输出，并开启 Media3 自带 controller；DLNA 播放时隐藏 AirPlay 风格的全屏 overlay，避免接收端触摸被上层 UI 干扰。
+- 本地控制同步：接收端暂停、播放、拖动进度条会更新 `DlnaMediaPlayer` 的缓存进度与传输状态，并触发 AVTransport GENA 通知，降低投屏端与接收端状态脱节的概率。
+- 小米 17 系统本地媒体发现兼容性：SSDP 发现响应改为大小写宽松匹配，补齐裸 UUID、root device、MediaRenderer、AVTransport、ConnectionManager、RenderingControl 多目标响应；alive/byebye 通知也补齐裸 UUID 与服务目标。
+- 设备描述兼容性：`description.xml` 增加 DLNA DMR 标记 `X_DLNADOC=DMR-1.50`、`presentationURL`，并扩大 `SinkProtocolInfo`，覆盖常见本地媒体 MIME，如 mp4/m4v/mkv/webm/mov/3gp/avi/flv/mpeg/ts、常见音频和通配 `video/*`、`audio/*`。
+- 2026-07-05 增加接收端“终止投屏”操作：DLNA 播放时触摸画面会短暂显示 `终止投屏` 按钮；按钮调用 `AirCastService.LocalBinder.terminateDlnaCasting()`，再走 `DlnaManager.stopPlaybackFromReceiver()` -> `UpnpHttpServer.stopPlaybackFromReceiver()` 清空当前 URI、停止 ExoPlayer，并主动发送 AVTransport LastChange 通知。
+- 2026-07-05 交互调整：`终止投屏` 按钮不再使用独立隐藏计时器，改为监听 `PlayerView` controller visibility；Media3 播放控制 UI 显示时按钮同步显示，控制 UI 隐藏时按钮同步隐藏。
+- 仍需真机复测：小米系统本地媒体投屏的设备列表是否恢复、发起投屏后是否能正常播放、接收端触摸是否能呼出播放控件并控制进度。
+
 ## 功能边界
 
 当前 README 和 CHANGELOG 显示 v0.3 已覆盖：
@@ -171,7 +184,7 @@ adb -s 192.168.31.212:45523 logcat -s AirCastService MainActivity NativeBridge V
 1. 真机验证闭环：构建通过不等于投屏链路稳定，需要按 AirPlay、DLNA、音频、断开重连、后台/PiP 分场景验证。
 2. Android 兼容性：处理 deprecated API，尤其是显示尺寸、全屏沉浸、通知权限和后台启动限制。
 3. 日志与诊断：为 RAOP 连接、解码器重建、DLNA SOAP 错误和 mDNS 注册失败整理可复用排障命令。
-4. 发布配置：当前 debug/release 元数据已对齐到 `versionName = "0.3.1"`、`versionCode = 4`；后续每次 tag/release 仍需同步更新。
+4. 发布配置：当前 debug/release 元数据已对齐到 `versionName = "0.4.0"`、`versionCode = 5`；后续每次 tag/release 仍需同步更新。
 5. 依赖授权：项目因 UxPlay 使用 GPL-3.0，发布前需要确保 LICENSE、源码提供方式和第三方依赖声明完整。
 
 ## 常用命令

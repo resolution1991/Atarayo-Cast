@@ -2,8 +2,12 @@ package com.atarayocast.app.dlna
 
 import android.content.Context
 import android.net.wifi.WifiManager
+import android.provider.Settings
 import android.util.Log
 import android.view.Surface
+import androidx.media3.ui.PlayerView
+import java.net.NetworkInterface
+import java.util.UUID
 
 /**
  * Top-level manager for the DLNA MediaRenderer.
@@ -14,7 +18,8 @@ import android.view.Surface
  */
 class DlnaManager(
     private val context: Context,
-    private val onStateChange: (Boolean) -> Unit
+    private val onStateChange: (Boolean) -> Unit,
+    private val onTransportStateChange: (DlnaMediaPlayer.TransportState) -> Unit = {}
 ) {
     companion object {
         private const val TAG = "DlnaManager"
@@ -27,15 +32,21 @@ class DlnaManager(
     private var httpServer: UpnpHttpServer? = null
     private var ssdServer: SsdServer? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var pendingSurface: Surface? = null
+    private var pendingPlayerView: PlayerView? = null
     private var isRunning = false
 
-    val friendlyName: String = "AirCast-DLNA"
+    var friendlyName: String = "AirCast-DLNA"
+        private set
 
-    fun start(): Boolean {
+    fun start(deviceName: String = friendlyName): Boolean {
         if (isRunning) {
             Log.w(TAG, "Already running")
             return true
         }
+
+        friendlyName = deviceName.ifBlank { "AirCast-DLNA" }
+        UpnpXmlBuilder.deviceUdn = buildStableDeviceUdn()
 
         var attempt = 0
         while (attempt < MAX_RETRIES) {
@@ -66,10 +77,21 @@ class DlnaManager(
             // 1) Create media player
             mediaPlayer = DlnaMediaPlayer(
                 appContext = context.applicationContext,
-                onStateChange = { Log.d(TAG, "Transport state: $it") },
+                onStateChange = {
+                    Log.d(TAG, "Transport state: $it")
+                    httpServer?.notifyTransportChanged()
+                    onTransportStateChange(it)
+                },
                 onPositionUpdate = { pos, dur -> Log.v(TAG, "Position: $pos / $dur") },
-                onError = { Log.e(TAG, "Player error: $it") }
-            ).also { it.init() }
+                onError = {
+                    Log.e(TAG, "Player error: $it")
+                    httpServer?.notifyTransportChanged()
+                }
+            ).also {
+                it.init()
+                it.setSurface(pendingSurface)
+                it.setPlayerView(pendingPlayerView)
+            }
 
             // 2) Start HTTP server (UPnP XML + SOAP)
             httpServer = UpnpHttpServer(mediaPlayer!!, friendlyName)
@@ -126,16 +148,40 @@ class DlnaManager(
     fun getMediaPlayer(): DlnaMediaPlayer? = mediaPlayer
     fun isRunning(): Boolean = isRunning
 
+    fun stopPlayback() {
+        mediaPlayer?.stop()
+    }
+
+    fun stopPlaybackFromReceiver() {
+        httpServer?.stopPlaybackFromReceiver() ?: mediaPlayer?.stop()
+    }
+
     fun setSurface(surface: Surface?) {
+        pendingSurface = surface
         mediaPlayer?.setSurface(surface)
         Log.i(TAG, "Surface ${if (surface != null) "set" else "cleared"} for DLNA player")
     }
 
+    fun setPlayerView(playerView: PlayerView?) {
+        pendingPlayerView = playerView
+        mediaPlayer?.setPlayerView(playerView)
+        Log.i(TAG, "PlayerView ${if (playerView != null) "set" else "cleared"} for DLNA player")
+    }
+
     private fun getLocalAddress(): String {
         try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val iface = interfaces.nextElement()
+            val interfaces = NetworkInterface.getNetworkInterfaces().toList()
+            val preferred = interfaces.sortedWith(
+                compareBy<NetworkInterface> {
+                    when {
+                        it.name.startsWith("wlan") -> 0
+                        it.name.startsWith("ap") -> 1
+                        it.name.startsWith("eth") -> 2
+                        else -> 3
+                    }
+                }.thenBy { it.name }
+            )
+            for (iface in preferred) {
                 if (iface.isLoopback || !iface.isUp) continue
                 val addresses = iface.inetAddresses
                 while (addresses.hasMoreElements()) {
@@ -151,5 +197,18 @@ class DlnaManager(
             Log.w(TAG, "Failed to get local address", e)
         }
         return "127.0.0.1"
+    }
+
+    private fun buildStableDeviceUdn(): String {
+        return try {
+            val androidId = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ANDROID_ID
+            ) ?: "atarayo-cast"
+            "uuid:${UUID.nameUUIDFromBytes("atarayo-dlna-$androidId".toByteArray())}"
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to build stable UDN", e)
+            UpnpXmlBuilder.deviceUdn
+        }
     }
 }

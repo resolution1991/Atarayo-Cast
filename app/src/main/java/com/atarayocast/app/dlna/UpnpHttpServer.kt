@@ -2,7 +2,6 @@ package com.atarayocast.app.dlna
 
 import android.util.Log
 import java.io.*
-import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
@@ -29,11 +28,16 @@ class UpnpHttpServer(
         // DLNA-compliant sink protocol info
         const val sinkProtocolInfo: String =
             "http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_BL_CIF15_AAC_520;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000," +
+            "http-get:*:video/mp4:*,http-get:*:video/x-m4v:*," +
             "http-get:*:video/x-matroska:*,http-get:*:video/webm:*," +
-            "http-get:*:audio/mpeg:*,http-get:*:audio/aac:*," +
+            "http-get:*:video/quicktime:*,http-get:*:video/3gpp:*," +
+            "http-get:*:video/x-msvideo:*,http-get:*:video/x-flv:*," +
             "http-get:*:video/mpeg:*,http-get:*:video/mp2t:*," +
+            "http-get:*:audio/mpeg:*,http-get:*:audio/mp4:*,http-get:*:audio/aac:*," +
+            "http-get:*:audio/x-m4a:*,http-get:*:audio/flac:*,http-get:*:audio/wav:*," +
             "http-get:*:image/jpeg:DLNA.ORG_PN=JPEG_SM," +
-            "http-get:*:image/png:DLNA.ORG_PN=PNG_LRG"
+            "http-get:*:image/png:DLNA.ORG_PN=PNG_LRG," +
+            "http-get:*:video/*:*,http-get:*:audio/*:*"
     }
 
     @Volatile
@@ -47,7 +51,6 @@ class UpnpHttpServer(
     private var volume: Int = 50
     private var mute: Boolean = false
     private var currentUri: String = ""
-    private var transportState: String = "STOPPED"
     private var eventSeq: Int = 0
 
     fun start(preferredPort: Int = 0): Int {
@@ -109,54 +112,82 @@ class UpnpHttpServer(
         try {
             socket.use { s ->
                 s.soTimeout = 10000
-                val input = BufferedReader(InputStreamReader(s.getInputStream()))
                 val output = BufferedOutputStream(s.getOutputStream())
-
-                // Read request line and headers
-                val requestLine = input.readLine() ?: return
-                val parts = requestLine.split(" ")
-                if (parts.size < 2) return
-
-                val method = parts[0]
-                val path = URLDecoder.decode(parts[1], "UTF-8")
-
-                // Read headers
-                val headers = mutableMapOf<String, String>()
-                var line = input.readLine()
-                while (!line.isNullOrEmpty()) {
-                    val colon = line.indexOf(':')
-                    if (colon > 0) {
-                        val key = line.substring(0, colon).trim().uppercase()
-                        val value = line.substring(colon + 1).trim()
-                        headers[key] = value
-                    }
-                    line = input.readLine()
-                }
-
-                // Read body if present
-                val contentLength = headers["CONTENT-LENGTH"]?.toIntOrNull() ?: 0
-                val body = if (contentLength > 0) {
-                    val bodyChars = CharArray(contentLength)
-                    var totalRead = 0
-                    while (totalRead < contentLength) {
-                        val read = input.read(bodyChars, totalRead, contentLength - totalRead)
-                        if (read < 0) break
-                        totalRead += read
-                    }
-                    String(bodyChars, 0, totalRead)
-                } else ""
+                val request = readHttpRequest(s.getInputStream()) ?: return
 
                 when {
-                    method == "SUBSCRIBE" -> handleSubscribe(output, path, headers)
-                    method == "UNSUBSCRIBE" -> handleUnsubscribe(output, path, headers)
-                    method == "GET" -> handleGet(output, path)
-                    method == "POST" -> handlePost(output, path, body, headers)
+                    request.method == "SUBSCRIBE" -> handleSubscribe(output, request.path, request.headers)
+                    request.method == "UNSUBSCRIBE" -> handleUnsubscribe(output, request.path, request.headers)
+                    request.method == "GET" -> handleGet(output, request.path)
+                    request.method == "HEAD" -> handleHead(output, request.path)
+                    request.method == "POST" -> handlePost(output, request.path, request.body, request.headers)
                     else -> sendEmptyResponse(output, 405, "Method Not Allowed")
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Client handling error", e)
         }
+    }
+
+    private data class HttpRequest(
+        val method: String,
+        val path: String,
+        val headers: Map<String, String>,
+        val body: String
+    )
+
+    private fun readHttpRequest(input: InputStream): HttpRequest? {
+        val headerBytes = ByteArrayOutputStream()
+        val delimiter = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
+        var matched = 0
+
+        while (matched < delimiter.size) {
+            val b = input.read()
+            if (b < 0) return null
+            headerBytes.write(b)
+            matched = if (b.toByte() == delimiter[matched]) {
+                matched + 1
+            } else if (b == '\r'.code) {
+                1
+            } else {
+                0
+            }
+            if (headerBytes.size() > 64 * 1024) {
+                Log.w(TAG, "HTTP headers too large")
+                return null
+            }
+        }
+
+        val headerText = String(headerBytes.toByteArray(), Charsets.ISO_8859_1)
+        val headerLines = headerText.split("\r\n")
+        val requestLine = headerLines.firstOrNull()?.takeIf { it.isNotBlank() } ?: return null
+        val parts = requestLine.split(" ")
+        if (parts.size < 2) return null
+
+        val headers = mutableMapOf<String, String>()
+        for (line in headerLines.drop(1)) {
+            if (line.isBlank()) break
+            val colon = line.indexOf(':')
+            if (colon > 0) {
+                headers[line.substring(0, colon).trim().uppercase()] = line.substring(colon + 1).trim()
+            }
+        }
+
+        val contentLength = headers["CONTENT-LENGTH"]?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val bodyBytes = ByteArray(contentLength)
+        var total = 0
+        while (total < contentLength) {
+            val read = input.read(bodyBytes, total, contentLength - total)
+            if (read < 0) break
+            total += read
+        }
+
+        return HttpRequest(
+            method = parts[0].uppercase(),
+            path = URLDecoder.decode(parts[1], "UTF-8"),
+            headers = headers,
+            body = String(bodyBytes, 0, total, Charsets.UTF_8)
+        )
     }
 
     // ---- GENA Event Subscription ----
@@ -204,6 +235,16 @@ class UpnpHttpServer(
                 "TIMEOUT" to timeout,
                 "SERVER" to "${android.os.Build.MODEL} UPnP/1.0 AirCast/1.0"
             ), "")
+
+        val serviceType = when {
+            path.contains("AVTransport") -> "AVTransport"
+            path.contains("RenderingControl") -> "RenderingControl"
+            else -> null
+        }
+        if (serviceType != null) {
+            val initialBody = buildPropertySetXml(buildLastChangeXml(serviceType))
+            clientPool.execute { sendNotify(subscribers[sid] ?: return@execute, 0, initialBody) }
+        }
     }
 
     private fun handleUnsubscribe(output: BufferedOutputStream, path: String, headers: Map<String, String>) {
@@ -234,6 +275,18 @@ class UpnpHttpServer(
             mapOf("Content-Type" to "text/xml; charset=utf-8"), body)
     }
 
+    private fun handleHead(output: BufferedOutputStream, path: String) {
+        val exists = path == "/description.xml" || path == "/" ||
+            path == "/ConnectionManager/desc.xml" ||
+            path == "/AVTransport/desc.xml" ||
+            path == "/RenderingControl/desc.xml"
+        if (exists) {
+            sendEmptyResponse(output, 200, "OK")
+        } else {
+            sendEmptyResponse(output, 404, "Not Found")
+        }
+    }
+
     // ---- POST (SOAP) Handler ----
 
     private fun handlePost(output: BufferedOutputStream, path: String, body: String, headers: Map<String, String>) {
@@ -244,12 +297,12 @@ class UpnpHttpServer(
             return
         }
 
-        val actionName = soapAction.substringAfter("#").trim('"')
+        val actionName = soapAction.substringAfter("#").trim('"', ' ', '\t')
 
         val responseBody = when {
-            path == "/ConnectionManager/control" -> handleConnectionManager(actionName, body)
-            path == "/AVTransport/control" -> handleAVTransport(actionName, body)
-            path == "/RenderingControl/control" -> handleRenderingControl(actionName, body)
+            path.equals("/ConnectionManager/control", ignoreCase = true) -> handleConnectionManager(actionName, body)
+            path.equals("/AVTransport/control", ignoreCase = true) -> handleAVTransport(actionName, body)
+            path.equals("/RenderingControl/control", ignoreCase = true) -> handleRenderingControl(actionName, body)
             else -> buildSoapFault(401, "Invalid service")
         }
 
@@ -263,7 +316,11 @@ class UpnpHttpServer(
             ), responseBody)
 
         // After state-changing actions, notify subscribers via GENA
-        if (httpStatus == 200 && (path == "/AVTransport/control" || path == "/RenderingControl/control")) {
+        if (httpStatus == 200 && (
+                path.equals("/AVTransport/control", ignoreCase = true) ||
+                path.equals("/RenderingControl/control", ignoreCase = true)
+            )
+        ) {
             notifySubscribers(path.removeSuffix("/control"))
         }
     }
@@ -271,15 +328,15 @@ class UpnpHttpServer(
     // ---- ConnectionManager Actions ----
 
     private fun handleConnectionManager(action: String, body: String): String {
-        return when (action) {
-            "GetProtocolInfo" -> buildSoapResponse(action) {
-                appendArg("Source", sinkProtocolInfo)
+        return when (action.lowercase()) {
+            "getprotocolinfo" -> buildSoapResponse("GetProtocolInfo") {
+                appendArg("Source", "")
                 appendArg("Sink", sinkProtocolInfo)
             }
-            "GetCurrentConnectionIDs" -> buildSoapResponse(action) {
+            "getcurrentconnectionids" -> buildSoapResponse("GetCurrentConnectionIDs") {
                 appendArg("ConnectionIDs", "0")
             }
-            "GetCurrentConnectionInfo" -> buildSoapResponse(action) {
+            "getcurrentconnectioninfo" -> buildSoapResponse("GetCurrentConnectionInfo") {
                 appendArg("RcsID", "-1")
                 appendArg("AVTransportID", "0")
                 appendArg("ProtocolInfo", "")
@@ -288,6 +345,12 @@ class UpnpHttpServer(
                 appendArg("Direction", "Input")
                 appendArg("Status", "OK")
             }
+            "prepareforconnection" -> buildSoapResponse("PrepareForConnection") {
+                appendArg("ConnectionID", "0")
+                appendArg("AVTransportID", "0")
+                appendArg("RcsID", "0")
+            }
+            "connectioncomplete" -> buildSoapResponse("ConnectionComplete") {}
             else -> buildSoapFault(401, "Unknown action: $action")
         }
     }
@@ -295,43 +358,45 @@ class UpnpHttpServer(
     // ---- AVTransport Actions ----
 
     private fun handleAVTransport(action: String, body: String): String {
-        return when (action) {
-            "SetAVTransportURI" -> {
+        return when (action.lowercase()) {
+            "setavtransporturi" -> {
                 val uri = extractArg(body, "CurrentURI")
                 val metadata = extractArg(body, "CurrentURIMetaData")
-                Log.i(TAG, "SetAVTransportURI: $uri")
+                val title = extractTitle(metadata)
+                Log.i(TAG, "SetAVTransportURI: $uri title=${title ?: "-"}")
+                if (uri.isBlank()) {
+                    return buildSoapFault(714, "No such resource")
+                }
                 currentUri = uri
-                transportState = "TRANSITIONING"
-                mediaPlayer.setUrl(uri, "")
-                buildSoapResponse(action) {}
+                mediaPlayer.setUrl(uri, title, autoPlay = true)
+                buildSoapResponse("SetAVTransportURI") {}
             }
-            "Play" -> {
+            "setnextavtransporturi" -> buildSoapResponse("SetNextAVTransportURI") {}
+            "play" -> {
                 Log.i(TAG, "AVTransport: Play")
                 mediaPlayer.play()
-                transportState = "PLAYING"
-                buildSoapResponse(action) {}
+                buildSoapResponse("Play") {}
             }
-            "Pause" -> {
+            "pause" -> {
                 Log.i(TAG, "AVTransport: Pause")
                 mediaPlayer.pause()
-                transportState = "PAUSED_PLAYBACK"
-                buildSoapResponse(action) {}
+                buildSoapResponse("Pause") {}
             }
-            "Stop" -> {
+            "stop" -> {
                 Log.i(TAG, "AVTransport: Stop")
                 mediaPlayer.stop()
-                transportState = "STOPPED"
-                buildSoapResponse(action) {}
+                currentUri = ""
+                buildSoapResponse("Stop") {}
             }
-            "Seek" -> {
+            "seek" -> {
                 val unit = extractArg(body, "Unit")
                 val target = extractArg(body, "Target")
                 Log.i(TAG, "AVTransport: Seek unit=$unit target=$target")
                 val ms = parseSeekTarget(unit, target)
                 mediaPlayer.seekTo(ms)
-                buildSoapResponse(action) {}
+                buildSoapResponse("Seek") {}
             }
-            "GetPositionInfo" -> buildSoapResponse(action) {
+            "getpositioninfo" -> buildSoapResponse("GetPositionInfo") {
                 val posMs = mediaPlayer.getCurrentPosition()
                 val durMs = mediaPlayer.getDuration()
                 appendArg("Track", if (currentUri.isNotEmpty()) "1" else "0")
@@ -343,13 +408,17 @@ class UpnpHttpServer(
                 appendArg("RelCount", "2147483647")
                 appendArg("AbsCount", "2147483647")
             }
-            "GetTransportInfo" -> buildSoapResponse(action) {
-                val state = if (currentUri.isEmpty()) "NO_MEDIA_PRESENT" else transportState
+            "gettransportinfo" -> buildSoapResponse("GetTransportInfo") {
+                val state = if (currentUri.isEmpty()) {
+                    "NO_MEDIA_PRESENT"
+                } else {
+                    mediaPlayer.getTransportState().name
+                }
                 appendArg("CurrentTransportState", state)
-                appendArg("CurrentTransportStatus", "OK")
+                appendArg("CurrentTransportStatus", mediaPlayer.getTransportStatus())
                 appendArg("CurrentSpeed", "1")
             }
-            "GetMediaInfo" -> buildSoapResponse(action) {
+            "getmediainfo" -> buildSoapResponse("GetMediaInfo") {
                 appendArg("NrTracks", if (currentUri.isNotEmpty()) "1" else "0")
                 appendArg("MediaDuration", formatDuration(mediaPlayer.getDuration()))
                 appendArg("CurrentURI", currentUri)
@@ -360,11 +429,21 @@ class UpnpHttpServer(
                 appendArg("RecordMedium", "NOT_IMPLEMENTED")
                 appendArg("WriteStatus", "NOT_IMPLEMENTED")
             }
-            "GetTransportSettings" -> buildSoapResponse(action) {
+            "getdevicecapabilities" -> buildSoapResponse("GetDeviceCapabilities") {
+                appendArg("PlayMedia", "NETWORK")
+                appendArg("RecMedia", "NOT_IMPLEMENTED")
+                appendArg("RecQualityModes", "NOT_IMPLEMENTED")
+            }
+            "getcurrenttransportactions" -> buildSoapResponse("GetCurrentTransportActions") {
+                appendArg("Actions", if (currentUri.isEmpty()) "Play" else "Play,Stop,Pause,Seek")
+            }
+            "setplaymode" -> buildSoapResponse("SetPlayMode") {}
+            "gettransportsettings" -> buildSoapResponse("GetTransportSettings") {
                 appendArg("PlayMode", "NORMAL")
                 appendArg("RecQualityMode", "NOT_IMPLEMENTED")
             }
-            "Next", "Previous" -> buildSoapResponse(action) {}
+            "next" -> buildSoapResponse("Next") {}
+            "previous" -> buildSoapResponse("Previous") {}
             else -> buildSoapFault(401, "Unknown action: $action")
         }
     }
@@ -372,24 +451,28 @@ class UpnpHttpServer(
     // ---- RenderingControl Actions ----
 
     private fun handleRenderingControl(action: String, body: String): String {
-        return when (action) {
-            "SetVolume" -> {
+        return when (action.lowercase()) {
+            "listpresets" -> buildSoapResponse("ListPresets") {
+                appendArg("CurrentPresetNameList", "FactoryDefaults")
+            }
+            "selectpreset" -> buildSoapResponse("SelectPreset") {}
+            "setvolume" -> {
                 val desired = extractArg(body, "DesiredVolume").toIntOrNull() ?: 50
                 volume = desired.coerceIn(0, 100)
                 mediaPlayer.setVolume(volume)
                 Log.i(TAG, "SetVolume: $volume")
-                buildSoapResponse(action) {}
+                buildSoapResponse("SetVolume") {}
             }
-            "GetVolume" -> buildSoapResponse(action) {
+            "getvolume" -> buildSoapResponse("GetVolume") {
                 appendArg("CurrentVolume", volume.toString())
             }
-            "SetMute" -> {
+            "setmute" -> {
                 mute = extractArg(body, "DesiredMute") == "1" || extractArg(body, "DesiredMute").equals("true", ignoreCase = true)
                 mediaPlayer.setMute(mute)
                 Log.i(TAG, "SetMute: $mute")
-                buildSoapResponse(action) {}
+                buildSoapResponse("SetMute") {}
             }
-            "GetMute" -> buildSoapResponse(action) {
+            "getmute" -> buildSoapResponse("GetMute") {
                 appendArg("CurrentMute", if (mute) "1" else "0")
             }
             else -> buildSoapFault(401, "Unknown action: $action")
@@ -444,19 +527,30 @@ ${result}
     }
 
     private fun extractArg(xml: String, argName: String): String {
-        val open = "<$argName>"
-        val close = "</$argName>"
-        val start = xml.indexOf(open)
-        if (start < 0) return ""
-        val end = xml.indexOf(close, start)
-        if (end < 0) return ""
-        return xml.substring(start + open.length, end)
+        val pattern = Regex(
+            "<(?:[A-Za-z0-9_\\-]+:)?$argName(?:\\s[^>]*)?>(.*?)</(?:[A-Za-z0-9_\\-]+:)?$argName>",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        )
+        return xmlUnescape(pattern.find(xml)?.groupValues?.get(1)?.trim() ?: "")
     }
 
     private fun getServiceTypeFromAction(action: String): String = when {
-        listOf("GetProtocolInfo", "GetCurrentConnectionIDs", "GetCurrentConnectionInfo").contains(action) ->
+        listOf(
+            "GetProtocolInfo",
+            "GetCurrentConnectionIDs",
+            "GetCurrentConnectionInfo",
+            "PrepareForConnection",
+            "ConnectionComplete"
+        ).contains(action) ->
             "ConnectionManager:1"
-        listOf("SetVolume", "GetVolume", "SetMute", "GetMute").contains(action) ->
+        listOf(
+            "ListPresets",
+            "SelectPreset",
+            "SetVolume",
+            "GetVolume",
+            "SetMute",
+            "GetMute"
+        ).contains(action) ->
             "RenderingControl:1"
         else -> "AVTransport:1"
     }
@@ -486,15 +580,32 @@ ${result}
         }
     }
 
+    fun notifyTransportChanged() {
+        notifySubscribers("/AVTransport")
+    }
+
+    fun stopPlaybackFromReceiver() {
+        Log.i(TAG, "Receiver requested AVTransport stop")
+        currentUri = ""
+        mediaPlayer.stop()
+        notifyTransportChanged()
+    }
+
     private fun buildLastChangeXml(serviceType: String): String {
+        val state = if (currentUri.isEmpty()) {
+            "NO_MEDIA_PRESENT"
+        } else {
+            mediaPlayer.getTransportState().name
+        }
         val eventXml = when (serviceType) {
             "AVTransport" -> {
                 """<Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/">""" +
                 """<InstanceID val="0">""" +
-                """<TransportState val="$transportState"/>""" +
-                """<TransportStatus val="OK"/>""" +
+                """<TransportState val="$state"/>""" +
+                """<TransportStatus val="${mediaPlayer.getTransportStatus()}"/>""" +
                 """<CurrentMediaDuration val="${formatDuration(mediaPlayer.getDuration())}"/>""" +
                 """<AVTransportURI val="$currentUri"/>""" +
+                """<RelativeTimePosition val="${formatDuration(mediaPlayer.getCurrentPosition())}"/>""" +
                 """</InstanceID></Event>"""
             }
             "RenderingControl" -> {
@@ -524,22 +635,33 @@ ${result}
     private fun sendNotify(sub: Subscriber, seq: Int, body: String) {
         try {
             val url = URL(sub.callbackUrl)
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "NOTIFY"
-            conn.doOutput = true
-            conn.setRequestProperty("CONTENT-TYPE", "text/xml; charset=utf-8")
-            conn.setRequestProperty("NT", "upnp:event")
-            conn.setRequestProperty("NTS", "upnp:propchange")
-            conn.setRequestProperty("SID", sub.sid)
-            conn.setRequestProperty("SEQ", seq.toString())
-            conn.connectTimeout = 5000
-            conn.readTimeout = 5000
+            val host = url.host
+            val port = if (url.port > 0) url.port else url.defaultPort.takeIf { it > 0 } ?: 80
+            val path = url.file.ifBlank { "/" }
+            val bodyBytes = body.toByteArray(Charsets.UTF_8)
 
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            Socket(host, port).use { socket ->
+                socket.soTimeout = 5000
+                val request = buildString {
+                    append("NOTIFY $path HTTP/1.1\r\n")
+                    append("HOST: $host:$port\r\n")
+                    append("CONTENT-TYPE: text/xml; charset=utf-8\r\n")
+                    append("NT: upnp:event\r\n")
+                    append("NTS: upnp:propchange\r\n")
+                    append("SID: ${sub.sid}\r\n")
+                    append("SEQ: $seq\r\n")
+                    append("Content-Length: ${bodyBytes.size}\r\n")
+                    append("Connection: close\r\n")
+                    append("\r\n")
+                }
+                val output = BufferedOutputStream(socket.getOutputStream())
+                output.write(request.toByteArray(Charsets.UTF_8))
+                output.write(bodyBytes)
+                output.flush()
 
-            val responseCode = conn.responseCode
-            Log.d(TAG, "NOTIFY to ${sub.callbackUrl} -> $responseCode (sid=${sub.sid})")
-            conn.disconnect()
+                val statusLine = BufferedReader(InputStreamReader(socket.getInputStream())).readLine()
+                Log.d(TAG, "NOTIFY to ${sub.callbackUrl} -> ${statusLine ?: "no response"} (sid=${sub.sid})")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to send GENA NOTIFY to ${sub.callbackUrl}: ${e.message}")
         }
@@ -604,5 +726,22 @@ ${result}
             Log.w(TAG, "Failed to parse seek target: $unit=$target", e)
             0
         }
+    }
+
+    private fun extractTitle(metadata: String): String? {
+        if (metadata.isBlank()) return null
+        val pattern = Regex(
+            "<(?:[A-Za-z0-9_\\-]+:)?title(?:\\s[^>]*)?>(.*?)</(?:[A-Za-z0-9_\\-]+:)?title>",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        )
+        return xmlUnescape(pattern.find(metadata)?.groupValues?.get(1)?.trim() ?: "").ifBlank { null }
+    }
+
+    private fun xmlUnescape(s: String): String {
+        return s.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&")
     }
 }

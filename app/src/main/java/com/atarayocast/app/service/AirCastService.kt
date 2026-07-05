@@ -17,12 +17,14 @@ import android.util.Log
 import android.view.Surface
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import androidx.media3.ui.PlayerView
 import com.atarayocast.app.MainActivity
 import com.atarayocast.app.R
 import com.atarayocast.app.audio.AudioPlayer
 import com.atarayocast.app.bridge.NativeBridge
 import com.atarayocast.app.bridge.NativeCallbacks
 import com.atarayocast.app.data.AppPrefs
+import com.atarayocast.app.dlna.DlnaMediaPlayer
 import com.atarayocast.app.dlna.DlnaManager
 import com.atarayocast.app.util.Constants
 import com.atarayocast.app.video.VideoDecoder
@@ -72,10 +74,17 @@ class AirCastService : Service(), NativeCallbacks {
     private val videoDecoder = VideoDecoder(nativeBridge)
     private val audioPlayer by lazy { AudioPlayer(nativeBridge, this) }
     private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
-    private val dlnaManager by lazy { DlnaManager(this) { running ->
-        Log.i(TAG, "DLNA service state changed: running=$running")
-    } }
+    private val dlnaManager by lazy {
+        DlnaManager(
+            context = this,
+            onStateChange = { running ->
+                Log.i(TAG, "DLNA service state changed: running=$running")
+            },
+            onTransportStateChange = { handleDlnaTransportState(it) }
+        )
+    }
     private var state = Constants.ConnectionState.IDLE
+    private var activeProtocol: Constants.Protocol? = null
     private var serverPort = 0
 
     // Debug stats
@@ -106,6 +115,19 @@ class AirCastService : Service(), NativeCallbacks {
             videoDecoder.setSurface(surface)
             dlnaManager.setSurface(surface)
         }
+        fun setDlnaPlayerView(playerView: PlayerView?) {
+            dlnaManager.setPlayerView(playerView)
+        }
+
+        fun terminateDlnaCasting() {
+            Log.i(TAG, "terminateDlnaCasting: receiver requested stop")
+            dlnaManager.stopPlaybackFromReceiver()
+            state = Constants.ConnectionState.WAITING
+            activeProtocol = null
+            updateNotification(getString(R.string.status_waiting))
+            broadcastState()
+        }
+
         /**
          * Disconnect the current AirPlay client but keep the service running.
          * Restarts the RAOP HTTP server to sever the Mac's connection at the
@@ -119,7 +141,9 @@ class AirCastService : Service(), NativeCallbacks {
             // Stop local playback
             videoDecoder.stop()
             audioPlayer.stop()
+            dlnaManager.stopPlayback()
             state = Constants.ConnectionState.WAITING
+            activeProtocol = null
             updateNotification(getString(R.string.status_waiting))
             broadcastState()
         }
@@ -249,7 +273,7 @@ class AirCastService : Service(), NativeCallbacks {
                     broadcastState()
 
                     registrar.register(serverPort)
-                    dlnaManager.start()
+                    dlnaManager.start(deviceName)
 
                     // Phase 3: Acquire wake lock if enabled
                     if (keepScreenOn) acquireWakeLock()
@@ -276,7 +300,36 @@ class AirCastService : Service(), NativeCallbacks {
         nativeBridge.stop()
         nativeBridge.destroy()
         state = Constants.ConnectionState.IDLE
+        activeProtocol = null
         broadcastState()
+    }
+
+    private fun handleDlnaTransportState(transportState: DlnaMediaPlayer.TransportState) {
+        when (transportState) {
+            DlnaMediaPlayer.TransportState.PLAYING,
+            DlnaMediaPlayer.TransportState.TRANSITIONING -> {
+                state = Constants.ConnectionState.STREAMING
+                activeProtocol = Constants.Protocol.DLNA
+                updateNotification(getString(R.string.status_streaming), "DLNA")
+                broadcastState()
+            }
+            DlnaMediaPlayer.TransportState.PAUSED_PLAYBACK -> {
+                state = Constants.ConnectionState.CONNECTED
+                activeProtocol = Constants.Protocol.DLNA
+                updateNotification(getString(R.string.status_connected), "DLNA")
+                broadcastState()
+            }
+            DlnaMediaPlayer.TransportState.STOPPED,
+            DlnaMediaPlayer.TransportState.NO_MEDIA_PRESENT -> {
+                if (state == Constants.ConnectionState.STREAMING ||
+                    state == Constants.ConnectionState.CONNECTED) {
+                    state = Constants.ConnectionState.WAITING
+                    activeProtocol = null
+                    updateNotification(getString(R.string.status_waiting))
+                    broadcastState()
+                }
+            }
+        }
     }
 
     // ---- Phase 3: WakeLock ----
@@ -375,6 +428,7 @@ class AirCastService : Service(), NativeCallbacks {
 
         if (state != Constants.ConnectionState.STREAMING) {
             state = Constants.ConnectionState.STREAMING
+            activeProtocol = Constants.Protocol.AIRPLAY
             updateNotification(getString(R.string.status_streaming))
             broadcastState()
         }
@@ -425,6 +479,7 @@ class AirCastService : Service(), NativeCallbacks {
         debugFps = 0; debugBitrate = 0f; debugCodec = "-"; debugResW = 0; debugResH = 0
         unsupportedCodecDisconnectScheduled.set(false)
         state = Constants.ConnectionState.CONNECTED
+        activeProtocol = Constants.Protocol.AIRPLAY
         updateNotification(getString(R.string.status_connected))
         broadcastState()
     }
@@ -434,6 +489,7 @@ class AirCastService : Service(), NativeCallbacks {
         audioPlayer.stop()
         videoDecoder.stop()
         state = Constants.ConnectionState.WAITING
+        activeProtocol = null
         updateNotification(getString(R.string.status_waiting))
         broadcastState()
     }
@@ -462,6 +518,7 @@ class AirCastService : Service(), NativeCallbacks {
                 nativeBridge.restartHttpd(serverPort)
             }
             state = Constants.ConnectionState.WAITING
+            activeProtocol = null
             updateNotification(getString(R.string.status_waiting))
             broadcastState()
         }
@@ -540,6 +597,7 @@ class AirCastService : Service(), NativeCallbacks {
         val intent = Intent(Constants.BROADCAST_STATE).apply {
             setPackage(packageName)
             putExtra(Constants.EXTRA_STATE, state.name)
+            activeProtocol?.let { putExtra(Constants.EXTRA_PROTOCOL, it.name) }
         }
         sendBroadcast(intent)
     }

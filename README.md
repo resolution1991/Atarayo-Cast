@@ -22,6 +22,7 @@ Android 设备作为 AirPlay 接收端和 DLNA Media Renderer，接收来自 mac
 - **SOAP 控制** — ConnectionManager / AVTransport / RenderingControl 全动作实现
 - **GENA 事件** — 事件订阅框架，支持 HTTP NOTIFY 推送到订阅者
 - **媒体播放** — Media3 ExoPlayer 处理 DLNA 推送的媒体 URL
+- **接收端控制** — 支持在被投屏端呼出播放控制、暂停/播放、拖动进度和终止投屏
 - **纯原生实现** — 无外部 DLNA 库依赖，全部使用 Android API
 
 ### 高级功能
@@ -354,7 +355,7 @@ adb shell am start -n com.atarayocast.app/.MainActivity
 
 ## 安全配置
 
-- **网络安全** — `network_security_config.xml` 默认禁用明文流量，仅允许 `localhost` 和 `.local` 域名使用明文（AirPlay/DLNA 本地通信需要）
+- **网络安全** — `network_security_config.xml` 允许明文流量，用于接收 DLNA 控制端推送的 `http://192.168.x.x/...` 局域网媒体 URL
 - **PIN 认证** — 用户自定义 4 位 PIN 码，通过 `raop_set_plist` 设置到 RAOP 引擎
 - **JNI 安全** — 所有 `GetStringUTFChars` 调用添加 NULL 检查
 - **XML 转义** — UPnP/SOAP XML 输出添加 `xmlEscape()` 防止注入
@@ -464,6 +465,7 @@ Atarayo-Cast/
 | v0.2 | 2026-07-04 | 视频优化 + 音量控制 + UI 增强 + Bug 修复 |
 | v0.3 | 2026-07-04 | 60fps 协商 + 启动/持续伪影修复 + 开发环境可移植性 |
 | v0.3.1 | 2026-07-05 | 高分辨率黑屏修复 + H.265 协商实验保护 + 设置页运行中锁定 |
+| v0.4.0 | 2026-07-05 | DLNA 可用性重构 + 接收端本地控制 + 新应用图标 |
 
 ---
 

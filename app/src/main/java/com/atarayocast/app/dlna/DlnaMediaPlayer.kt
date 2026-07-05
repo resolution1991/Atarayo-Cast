@@ -5,10 +5,14 @@ import android.net.Uri
 import android.os.Looper
 import android.util.Log
 import android.view.Surface
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 
 /**
  * Media player for DLNA content. Wraps ExoPlayer and exposes state
@@ -34,14 +38,21 @@ class DlnaMediaPlayer(
     private var currentTitle: String? = null
     private var audioManager: AudioManager? = null
     private var pendingSurface: Surface? = null
+    private var playerView: PlayerView? = null
+    @Volatile private var cachedPositionMs: Long = 0
+    @Volatile private var cachedDurationMs: Long = 0
+    @Volatile private var cachedTransportState: TransportState = TransportState.NO_MEDIA_PRESENT
+    @Volatile private var lastError: String? = null
+    @Volatile private var videoWidth: Int = 0
+    @Volatile private var videoHeight: Int = 0
+    @Volatile private var renderedFirstFrame: Boolean = false
 
     private val positionRunnable = object : Runnable {
         override fun run() {
             val p = player ?: return
             if (p.playbackState == Player.STATE_READY || p.playbackState == Player.STATE_BUFFERING) {
-                val pos = p.currentPosition.coerceAtLeast(0)
-                val dur = p.duration.coerceAtLeast(0)
-                onPositionUpdate(pos, dur)
+                updateCachedPosition(p)
+                onPositionUpdate(cachedPositionMs, cachedDurationMs)
             }
             mainHandler.postDelayed(this, 1000)
         }
@@ -53,19 +64,24 @@ class DlnaMediaPlayer(
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
                 Player.STATE_READY -> {
+                    updateCachedPosition(player)
                     if (player?.playWhenReady == true) {
-                        onStateChange(TransportState.PLAYING)
+                        updateTransportState(TransportState.PLAYING)
+                    } else {
+                        updateTransportState(TransportState.PAUSED_PLAYBACK)
                     }
                 }
                 Player.STATE_BUFFERING -> {
-                    onStateChange(TransportState.TRANSITIONING)
+                    updateCachedPosition(player)
+                    updateTransportState(TransportState.TRANSITIONING)
                 }
                 Player.STATE_ENDED -> {
-                    onStateChange(TransportState.STOPPED)
+                    updateCachedPosition(player)
+                    updateTransportState(TransportState.STOPPED)
                     stopPositionUpdates()
                 }
                 Player.STATE_IDLE -> {
-                    onStateChange(TransportState.NO_MEDIA_PRESENT)
+                    updateTransportState(if (currentUrl.isNullOrEmpty()) TransportState.NO_MEDIA_PRESENT else TransportState.STOPPED)
                     stopPositionUpdates()
                 }
             }
@@ -73,17 +89,43 @@ class DlnaMediaPlayer(
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             if (playWhenReady && player?.playbackState == Player.STATE_READY) {
-                onStateChange(TransportState.PLAYING)
+                startPositionUpdates()
+                updateTransportState(TransportState.PLAYING)
             } else if (!playWhenReady && player?.playbackState == Player.STATE_READY) {
-                onStateChange(TransportState.PAUSED_PLAYBACK)
+                updateCachedPosition(player)
+                onPositionUpdate(cachedPositionMs, cachedDurationMs)
+                updateTransportState(TransportState.PAUSED_PLAYBACK)
             }
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int
+        ) {
+            updateCachedPosition(player)
+            onPositionUpdate(cachedPositionMs, cachedDurationMs)
+            onStateChange(cachedTransportState)
+            Log.i(TAG, "Position changed: reason=$reason pos=$cachedPositionMs/${cachedDurationMs}")
         }
 
         override fun onPlayerError(error: PlaybackException) {
             Log.e(TAG, "Player error", error)
-            onStateChange(TransportState.STOPPED)
-            onError(error.message ?: "Playback error")
+            lastError = error.message ?: "Playback error"
+            updateTransportState(TransportState.STOPPED)
+            onError(lastError ?: "Playback error")
             stopPositionUpdates()
+        }
+
+        override fun onVideoSizeChanged(videoSize: VideoSize) {
+            videoWidth = videoSize.width
+            videoHeight = videoSize.height
+            Log.i(TAG, "Video size: ${videoSize.width}x${videoSize.height} unappliedRotation=${videoSize.unappliedRotationDegrees} pixelRatio=${videoSize.pixelWidthHeightRatio}")
+        }
+
+        override fun onRenderedFirstFrame() {
+            renderedFirstFrame = true
+            Log.i(TAG, "Rendered first DLNA video frame")
         }
     }
 
@@ -91,8 +133,10 @@ class DlnaMediaPlayer(
         if (player != null) return
         player = ExoPlayer.Builder(appContext).build().also {
             it.addListener(playerListener)
-            // Apply pending surface if set before init
-            pendingSurface?.let { s -> it.setVideoSurface(s) }
+            playerView?.player = it
+            if (playerView == null) {
+                pendingSurface?.let { s -> it.setVideoSurface(s) }
+            }
         }
         Log.i(TAG, "DlnaMediaPlayer initialized")
     }
@@ -100,23 +144,62 @@ class DlnaMediaPlayer(
     fun setSurface(surface: Surface?) {
         pendingSurface = surface
         mainHandler.post {
-            player?.setVideoSurface(surface)
+            if (playerView == null) {
+                player?.setVideoSurface(surface)
+            }
         }
         Log.i(TAG, "Surface set: ${surface != null}")
     }
 
-    fun setUrl(url: String, title: String? = null) {
+    fun setPlayerView(view: PlayerView?) {
+        mainHandler.post {
+            if (playerView === view) return@post
+            playerView?.player = null
+            playerView = view
+            if (view != null) {
+                view.useController = true
+                view.controllerAutoShow = true
+                view.controllerShowTimeoutMs = 5000
+                player?.clearVideoSurface()
+                view.player = player
+                view.showController()
+                Log.i(TAG, "PlayerView attached for DLNA video")
+            } else {
+                player?.let { p ->
+                    pendingSurface?.let { p.setVideoSurface(it) }
+                }
+                Log.i(TAG, "PlayerView detached for DLNA video")
+            }
+        }
+    }
+
+    fun setUrl(url: String, title: String? = null, autoPlay: Boolean = false) {
         currentUrl = url
         currentTitle = title
+        lastError = null
+        renderedFirstFrame = false
+        videoWidth = 0
+        videoHeight = 0
+        cachedPositionMs = 0
+        cachedDurationMs = 0
         mainHandler.post {
             val p = player ?: return@post
-            p.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
+            val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(url))
+            title?.takeIf { it.isNotBlank() }?.let {
+                mediaItemBuilder.setMediaMetadata(
+                    MediaMetadata.Builder().setTitle(it).build()
+                )
+            }
+            p.setMediaItem(mediaItemBuilder.build())
+            p.playWhenReady = autoPlay
             p.prepare()
-            onStateChange(TransportState.TRANSITIONING)
+            updateTransportState(TransportState.TRANSITIONING)
+            if (autoPlay) startPositionUpdates()
         }
     }
 
     fun play() {
+        lastError = null
         mainHandler.post {
             player?.playWhenReady = true
             startPositionUpdates()
@@ -135,7 +218,10 @@ class DlnaMediaPlayer(
             player?.clearMediaItems()
             currentUrl = null
             currentTitle = null
-            onStateChange(TransportState.STOPPED)
+            lastError = null
+            cachedPositionMs = 0
+            cachedDurationMs = 0
+            updateTransportState(TransportState.STOPPED)
             stopPositionUpdates()
         }
     }
@@ -147,15 +233,24 @@ class DlnaMediaPlayer(
     }
 
     fun getCurrentPosition(): Long {
-        return player?.currentPosition?.coerceAtLeast(0) ?: 0
+        return cachedPositionMs
     }
 
     fun getDuration(): Long {
-        return player?.duration?.coerceAtLeast(0) ?: 0
+        return cachedDurationMs
     }
 
     fun getCurrentUrl(): String? = currentUrl
     fun getCurrentTitle(): String? = currentTitle
+    fun getTransportStatus(): String = if (lastError == null) "OK" else "ERROR_OCCURRED"
+    fun getLastError(): String? = lastError
+    fun getVideoWidth(): Int = videoWidth
+    fun getVideoHeight(): Int = videoHeight
+    fun hasRenderedFirstFrame(): Boolean = renderedFirstFrame
+
+    fun getTransportState(): TransportState {
+        return cachedTransportState
+    }
 
     fun setVolume(volume: Int) {
         // DLNA Volume is 0-100, ExoPlayer expects 0.0-1.0
@@ -184,8 +279,22 @@ class DlnaMediaPlayer(
         mainHandler.removeCallbacks(positionRunnable)
     }
 
+    private fun updateCachedPosition(p: Player?) {
+        if (p == null) return
+        cachedPositionMs = p.currentPosition.coerceAtLeast(0)
+        val duration = p.duration
+        cachedDurationMs = if (duration == C.TIME_UNSET || duration < 0) 0 else duration
+    }
+
+    private fun updateTransportState(state: TransportState) {
+        cachedTransportState = state
+        onStateChange(state)
+    }
+
     fun destroy() {
         stopPositionUpdates()
+        playerView?.player = null
+        playerView = null
         player?.release()
         player = null
         Log.i(TAG, "DlnaMediaPlayer destroyed")

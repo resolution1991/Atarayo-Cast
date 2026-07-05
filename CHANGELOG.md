@@ -1,8 +1,26 @@
 # 开发日志
 
-记录 Atarayo-Cast 从项目创建到 v0.3.1 基线的完整开发过程。
+记录 Atarayo-Cast 从项目创建到 v0.4.0 基线的完整开发过程。
 
 ---
+
+## v0.4.0 — DLNA 可用性重构与新图标发布基线 (2026-07-05)
+
+### DLNA Media Renderer 可用性修复
+
+- 修复 DLNA 设备名称、稳定 UDN、SSDP `LOCATION`、HTTP/SOAP 请求体读取和命名空间参数解析，提升系统与第三方投屏端兼容性。
+- 补齐 DLNA 控制端常见预检动作、GENA 初始事件和 LastChange 状态通知，解决投屏端进度、播放状态和控制状态不同步问题。
+- 允许局域网 HTTP 明文媒体 URL，避免 DLNA 本地媒体推送被 Android cleartext 策略拦截。
+
+### DLNA 视频与接收端本地控制
+
+- 新增独立 `PlayerView` 承载 DLNA 视频输出，修复音频可播放但视频黑屏的问题。
+- 接收端支持触摸呼出 Media3 播放控制 UI，可在被投屏端暂停、播放和拖动进度。
+- 新增 `终止投屏` 操作，并与 Media3 播放控制 UI 同步显示/隐藏；点击后清空 AVTransport 当前 URI、停止 ExoPlayer，并向投屏端发送状态变更通知。
+
+### 应用图标
+
+- 将 APK launcher 图标替换为新的黑白人物图标，并同步 legacy PNG 与 Android 8+ adaptive icon 资源。
 
 ## v0.3.1 — 高分辨率与设置锁定本地基线 (2026-07-05)
 
@@ -609,7 +627,7 @@ enum class Resolution(val key: String, val width: Int, val height: Int, val fps:
 |------|------|
 | PIN fallback 为 1234 | `random_pin()` 失败时禁用 PIN（requirePin=false） |
 | JNI 字符串 NULL 未检查 | 所有 `GetStringUTFChars` 添加 NULL 检查 |
-| 全局明文流量 | `network_security_config.xml`，仅 localhost/.local 允许明文 |
+| 明文流量范围 | DLNA 推送媒体常使用局域网 IP HTTP URL，`network_security_config.xml` 允许明文流量以保证接收端能拉流 |
 | UPnP XML 注入 | `xmlEscape()` 方法转义特殊字符 |
 | ALACDecoder new 失败 | try-catch `std::bad_alloc` 替代无效的 `if (!dec)` |
 
@@ -796,6 +814,7 @@ enum class Resolution(val key: String, val width: Int, val height: Int, val fps:
 | v0.2 | 2026-07-04 | 视频优化 + 音量控制 + UI 增强 + Bug 修复 |
 | v0.3 | 2026-07-04 | 60fps 协商 + 启动/持续伪影修复 + 开发环境可移植性 |
 | v0.3.1 | 2026-07-05 | 高分辨率黑屏修复 + H.265 协商实验保护 + 设置页运行中锁定 |
+| v0.4.0 | 2026-07-05 | DLNA 可用性重构 + 接收端本地控制 + 新应用图标 |
 
 ---
 

@@ -12,6 +12,34 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- DLNA video output. Kept separate from the AirPlay SurfaceView so
+         ExoPlayer can own its player/surface lifecycle directly. -->
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/dlnaPlayerView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        android:visibility="gone"
+        app:resize_mode="fit"
+        app:surface_type="surface_view"
+        app:use_controller="true" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnDlnaStopCasting"
+        style="@style/Widget.Material3.Button"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="16dp"
+        android:backgroundTint="@color/status_error"
+        android:contentDescription="@string/btn_stop_casting"
+        android:minWidth="48dp"
+        android:text="@string/btn_stop_casting"
+        android:textColor="@android:color/white"
+        android:visibility="gone"
+        app:icon="@android:drawable/ic_menu_close_clear_cancel"
+        app:iconTint="@android:color/white" />
+
     <!-- "No input" centered text (shown when not casting) -->
     <TextView
         android:id="@+id/noInputText"

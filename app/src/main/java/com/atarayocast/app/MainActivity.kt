@@ -26,6 +26,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.ui.PlayerView
 import com.atarayocast.app.data.AppPrefs
 import com.atarayocast.app.databinding.ActivityMainBinding
 import com.atarayocast.app.service.AirCastService
@@ -53,6 +54,7 @@ class MainActivity : AppCompatActivity() {
     private val hideHandler = Handler(Looper.getMainLooper())
     private val hideOverlayRunnable = Runnable { hideControlOverlay() }
     private var isCasting = false
+    private var activeProtocol: Constants.Protocol? = null
     private var pipEnabled = true
     private var debugOverlayEnabled = false
     private var keepScreenOnEnabled = false
@@ -75,6 +77,7 @@ class MainActivity : AppCompatActivity() {
             if (surface != null && surface.isValid) {
                 binder?.setSurface(surface)
             }
+            binder?.setDlnaPlayerView(binding.dlnaPlayerView)
             Log.i(TAG, "Bound to AirCastService")
         }
 
@@ -87,6 +90,9 @@ class MainActivity : AppCompatActivity() {
     private val stateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val stateName = intent.getStringExtra(Constants.EXTRA_STATE)
+            activeProtocol = intent.getStringExtra(Constants.EXTRA_PROTOCOL)?.let { protocolName ->
+                runCatching { Constants.Protocol.valueOf(protocolName) }.getOrNull()
+            }
             stateName?.let {
                 try {
                     val state = Constants.ConnectionState.valueOf(it)
@@ -153,6 +159,17 @@ class MainActivity : AppCompatActivity() {
             }
             false
         }
+        binding.dlnaPlayerView.setControllerVisibilityListener(
+            PlayerView.ControllerVisibilityListener { visibility ->
+                if (visibility == View.VISIBLE &&
+                    isCasting &&
+                    activeProtocol == Constants.Protocol.DLNA) {
+                    showDlnaStopCastingButton()
+                } else {
+                    hideDlnaStopCastingButton()
+                }
+            }
+        )
     }
 
     private fun showControlOverlay() {
@@ -180,6 +197,21 @@ class MainActivity : AppCompatActivity() {
         if (isFullscreen) {
             hideHandler.postDelayed(hideOverlayRunnable, Constants.CONTROL_AUTO_HIDE_DELAY_MS)
         }
+    }
+
+    private fun showDlnaStopCastingButton() {
+        if (!isCasting || activeProtocol != Constants.Protocol.DLNA) return
+        binding.btnDlnaStopCasting.animate().cancel()
+        binding.btnDlnaStopCasting.alpha = 1f
+        binding.btnDlnaStopCasting.visibility = View.VISIBLE
+    }
+
+    private fun hideDlnaStopCastingButton() {
+        binding.btnDlnaStopCasting.animate()
+            .alpha(0f)
+            .setDuration(200)
+            .withEndAction { binding.btnDlnaStopCasting.visibility = View.GONE }
+            .start()
     }
 
     // ---- Buttons ----
@@ -237,6 +269,12 @@ class MainActivity : AppCompatActivity() {
                 Log.w(TAG, "Failed to clear Surface", e)
             }
             scheduleOverlayHide()
+        }
+
+        binding.btnDlnaStopCasting.setOnClickListener {
+            Log.i(TAG, "DLNA stop casting button clicked")
+            serviceBinder?.terminateDlnaCasting()
+            binding.btnDlnaStopCasting.visibility = View.GONE
         }
     }
 
@@ -328,6 +366,7 @@ class MainActivity : AppCompatActivity() {
         if (!serviceBound) return
         try {
             serviceBinder?.setSurface(null)
+            serviceBinder?.setDlnaPlayerView(null)
             unbindService(serviceConnection)
         } catch (e: IllegalArgumentException) {
             Log.w(TAG, "Service not registered")
@@ -447,7 +486,7 @@ class MainActivity : AppCompatActivity() {
         val sb = StringBuilder()
         sb.appendLine("AirCast Debug")
         sb.appendLine("State: ${state.name}")
-        sb.appendLine("Protocol: ${if (isCasting) "AirPlay" else "-"}")
+        sb.appendLine("Protocol: ${activeProtocol?.name ?: "-"}")
         sb.appendLine("Service: ${if (viewModel.serviceRunning.value == true) "Running" else "Stopped"}")
         sb.appendLine("Fullscreen: $isFullscreen")
         sb.appendLine("Surface: ${if (binding.surfaceView.holder.surface?.isValid == true) "Valid" else "Invalid"}")
@@ -485,11 +524,13 @@ class MainActivity : AppCompatActivity() {
 
         when (state) {
             Constants.ConnectionState.IDLE -> {
+                activeProtocol = null
                 binding.statusText.text = getString(R.string.status_idle)
                 binding.statusIndicator.setBackgroundResource(R.drawable.status_dot_gray)
                 binding.btnClose.visibility = View.GONE
             }
             Constants.ConnectionState.WAITING -> {
+                activeProtocol = null
                 binding.statusText.text = getString(R.string.status_waiting)
                 binding.statusIndicator.setBackgroundResource(R.drawable.status_dot_orange)
                 binding.btnClose.visibility = View.GONE
@@ -512,6 +553,19 @@ class MainActivity : AppCompatActivity() {
 
         // Feature 4: Show "no input" text when not casting, hide when casting
         binding.noInputText.visibility = if (isCasting) View.GONE else View.VISIBLE
+        val isDlnaCasting = isCasting && activeProtocol == Constants.Protocol.DLNA
+        binding.dlnaPlayerView.visibility = if (isDlnaCasting) View.VISIBLE else View.GONE
+        binding.surfaceView.visibility = if (isDlnaCasting) View.INVISIBLE else View.VISIBLE
+        if (isDlnaCasting) {
+            hideHandler.removeCallbacks(hideOverlayRunnable)
+            binding.controlOverlay.animate().cancel()
+            binding.controlOverlay.visibility = View.GONE
+            overlayVisible = false
+            binding.dlnaPlayerView.showController()
+        } else {
+            binding.btnDlnaStopCasting.animate().cancel()
+            binding.btnDlnaStopCasting.visibility = View.GONE
+        }
 
         // Update non-fullscreen card
         if (!isFullscreen) {

@@ -8,7 +8,7 @@ import java.util.UUID
  */
 object UpnpXmlBuilder {
 
-    val deviceUdn: String = "uuid:${UUID.randomUUID()}"
+    var deviceUdn: String = "uuid:${UUID.randomUUID()}"
 
     // Configuration
     private const val MANUFACTURER = "AirCast"
@@ -48,7 +48,7 @@ object UpnpXmlBuilder {
     fun buildDeviceDescription(friendlyName: String): String {
         val now = System.currentTimeMillis() / 1000
         return """<?xml version="1.0"?>
-<root xmlns="urn:schemas-upnp-org:device-1-0">
+<root xmlns="urn:schemas-upnp-org:device-1-0" xmlns:dlna="urn:schemas-dlna-org:device-1-0">
   <specVersion>
     <major>1</major>
     <minor>0</minor>
@@ -63,8 +63,11 @@ object UpnpXmlBuilder {
     <modelName>$MODEL_NAME</modelName>
     <modelNumber>$MODEL_NUMBER</modelNumber>
     <modelURL>$MODEL_URL</modelURL>
+    <dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>
+    <dlna:X_DLNACAP></dlna:X_DLNACAP>
     <serialNumber>$SERIAL_NUMBER</serialNumber>
     <UDN>$deviceUdn</UDN>
+    <presentationURL>http://$host:$httpPort/</presentationURL>
     <serviceList>
       <service>
         <serviceType>$SERVICE_TYPE_CM</serviceType>
@@ -122,6 +125,22 @@ object UpnpXmlBuilder {
         <argument><name>Status</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionStatus</relatedStateVariable></argument>
       </argumentList>
     </action>
+    <action><name>PrepareForConnection</name>
+      <argumentList>
+        <argument><name>RemoteProtocolInfo</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ProtocolInfo</relatedStateVariable></argument>
+        <argument><name>PeerConnectionManager</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionManager</relatedStateVariable></argument>
+        <argument><name>PeerConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>
+        <argument><name>Direction</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Direction</relatedStateVariable></argument>
+        <argument><name>ConnectionID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>
+        <argument><name>AVTransportID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_AVTransportID</relatedStateVariable></argument>
+        <argument><name>RcsID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RcsID</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+    <action><name>ConnectionComplete</name>
+      <argumentList>
+        <argument><name>ConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>
+      </argumentList>
+    </action>
   </actionList>
   <serviceStateTable>
     <stateVariable sendEvents="no"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>
@@ -151,6 +170,13 @@ object UpnpXmlBuilder {
         <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
         <argument><name>CurrentURI</name><direction>in</direction><relatedStateVariable>AVTransportURI</relatedStateVariable></argument>
         <argument><name>CurrentURIMetaData</name><direction>in</direction><relatedStateVariable>AVTransportURIMetaData</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+    <action><name>SetNextAVTransportURI</name>
+      <argumentList>
+        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+        <argument><name>NextURI</name><direction>in</direction><relatedStateVariable>NextAVTransportURI</relatedStateVariable></argument>
+        <argument><name>NextURIMetaData</name><direction>in</direction><relatedStateVariable>NextAVTransportURIMetaData</relatedStateVariable></argument>
       </argumentList>
     </action>
     <action><name>Play</name>
@@ -221,6 +247,26 @@ object UpnpXmlBuilder {
         <argument><name>WriteStatus</name><direction>out</direction><relatedStateVariable>RecordMediumWriteStatus</relatedStateVariable></argument>
       </argumentList>
     </action>
+    <action><name>GetDeviceCapabilities</name>
+      <argumentList>
+        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+        <argument><name>PlayMedia</name><direction>out</direction><relatedStateVariable>PossiblePlaybackStorageMedia</relatedStateVariable></argument>
+        <argument><name>RecMedia</name><direction>out</direction><relatedStateVariable>PossibleRecordStorageMedia</relatedStateVariable></argument>
+        <argument><name>RecQualityModes</name><direction>out</direction><relatedStateVariable>PossibleRecordQualityModes</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+    <action><name>GetCurrentTransportActions</name>
+      <argumentList>
+        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+        <argument><name>Actions</name><direction>out</direction><relatedStateVariable>CurrentTransportActions</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+    <action><name>SetPlayMode</name>
+      <argumentList>
+        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+        <argument><name>NewPlayMode</name><direction>in</direction><relatedStateVariable>CurrentPlayMode</relatedStateVariable></argument>
+      </argumentList>
+    </action>
     <action><name>GetTransportSettings</name>
       <argumentList>
         <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
@@ -256,6 +302,10 @@ object UpnpXmlBuilder {
     <stateVariable sendEvents="no"><name>PlaybackStorageMedium</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>RecordStorageMedium</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>RecordMediumWriteStatus</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>PossiblePlaybackStorageMedia</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>PossibleRecordStorageMedia</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>PossibleRecordQualityModes</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>CurrentTransportActions</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_SeekMode</name><dataType>string</dataType>
       <allowedValueList><allowedValue>TRACK_NR</allowedValue><allowedValue>REL_TIME</allowedValue><allowedValue>ABS_TIME</allowedValue></allowedValueList>
@@ -271,6 +321,18 @@ object UpnpXmlBuilder {
 <scpd xmlns="urn:schemas-upnp-org:service-1-0">
   <specVersion><major>1</major><minor>0</minor></specVersion>
   <actionList>
+    <action><name>ListPresets</name>
+      <argumentList>
+        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+        <argument><name>CurrentPresetNameList</name><direction>out</direction><relatedStateVariable>PresetNameList</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+    <action><name>SelectPreset</name>
+      <argumentList>
+        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+        <argument><name>PresetName</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_PresetName</relatedStateVariable></argument>
+      </argumentList>
+    </action>
     <action><name>SetVolume</name>
       <argumentList>
         <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
@@ -305,6 +367,10 @@ object UpnpXmlBuilder {
       <allowedValueRange><minimum>0</minimum><maximum>100</maximum><step>1</step></allowedValueRange>
     </stateVariable>
     <stateVariable sendEvents="yes"><name>Mute</name><dataType>boolean</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>PresetNameList</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_PresetName</name><dataType>string</dataType>
+      <allowedValueList><allowedValue>FactoryDefaults</allowedValue></allowedValueList>
+    </stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Channel</name><dataType>string</dataType>
       <allowedValueList><allowedValue>Master</allowedValue></allowedValueList>

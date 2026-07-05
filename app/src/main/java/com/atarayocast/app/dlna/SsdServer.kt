@@ -29,6 +29,7 @@ class SsdServer(
     private var notifyThread: Thread? = null
 
     // UUID that identifies this specific device instance
+    private val usnUuid = UpnpXmlBuilder.deviceUdn
     private val usnRoot = "${UpnpXmlBuilder.deviceUdn}::upnp:rootdevice"
     private val usnDevice = "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.DEVICE_TYPE}"
 
@@ -113,10 +114,10 @@ class SsdServer(
 
     private fun processPacket(data: String, remoteAddr: InetAddress, remotePort: Int) {
         // Check if it's M-SEARCH
-        if (!data.startsWith("M-SEARCH")) return
+        if (!data.trimStart().startsWith("M-SEARCH", ignoreCase = true)) return
 
         // Extract ST (Search Target) header
-        val st = extractHeader(data, "ST") ?: return
+        val st = extractHeader(data, "ST")?.trim('"', ' ', '\t') ?: return
         val man = extractHeader(data, "MAN") ?: ""
         if (!man.contains("ssdp:discover", ignoreCase = true)) return
 
@@ -127,32 +128,43 @@ class SsdServer(
         val responseSt: String
 
         when {
-            st == "ssdp:all" -> {
+            st.equals("ssdp:all", ignoreCase = true) -> {
                 // Respond for root device
+                sendSearchResponse(remoteAddr, remotePort, usnUuid, UpnpXmlBuilder.deviceUdn)
                 sendSearchResponse(remoteAddr, remotePort, usnRoot, "upnp:rootdevice")
                 sendSearchResponse(remoteAddr, remotePort, usnDevice, UpnpXmlBuilder.DEVICE_TYPE)
                 sendSearchResponse(remoteAddr, remotePort,
                     "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_AVT}",
                     UpnpXmlBuilder.SERVICE_TYPE_AVT)
+                sendSearchResponse(remoteAddr, remotePort,
+                    "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_CM}",
+                    UpnpXmlBuilder.SERVICE_TYPE_CM)
+                sendSearchResponse(remoteAddr, remotePort,
+                    "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_RCS}",
+                    UpnpXmlBuilder.SERVICE_TYPE_RCS)
                 return
             }
-            st == "upnp:rootdevice" -> {
+            st.equals(UpnpXmlBuilder.deviceUdn, ignoreCase = true) -> {
+                responseUsn = usnUuid
+                responseSt = UpnpXmlBuilder.deviceUdn
+            }
+            st.equals("upnp:rootdevice", ignoreCase = true) -> {
                 responseUsn = usnRoot
                 responseSt = "upnp:rootdevice"
             }
-            st == UpnpXmlBuilder.DEVICE_TYPE -> {
+            st.equals(UpnpXmlBuilder.DEVICE_TYPE, ignoreCase = true) -> {
                 responseUsn = usnDevice
                 responseSt = UpnpXmlBuilder.DEVICE_TYPE
             }
-            st == UpnpXmlBuilder.SERVICE_TYPE_AVT -> {
+            st.equals(UpnpXmlBuilder.SERVICE_TYPE_AVT, ignoreCase = true) -> {
                 responseUsn = "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_AVT}"
                 responseSt = UpnpXmlBuilder.SERVICE_TYPE_AVT
             }
-            st == UpnpXmlBuilder.SERVICE_TYPE_CM -> {
+            st.equals(UpnpXmlBuilder.SERVICE_TYPE_CM, ignoreCase = true) -> {
                 responseUsn = "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_CM}"
                 responseSt = UpnpXmlBuilder.SERVICE_TYPE_CM
             }
-            st == UpnpXmlBuilder.SERVICE_TYPE_RCS -> {
+            st.equals(UpnpXmlBuilder.SERVICE_TYPE_RCS, ignoreCase = true) -> {
                 responseUsn = "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_RCS}"
                 responseSt = UpnpXmlBuilder.SERVICE_TYPE_RCS
             }
@@ -172,7 +184,7 @@ class SsdServer(
         st: String
     ) {
         try {
-            val location = "http://${getLocalAddress()}:${httpPort}/description.xml"
+            val location = "http://${UpnpXmlBuilder.host.ifBlank { getLocalAddress() }}:${httpPort}/description.xml"
             val maxAge = 1800
 
             val response = buildString {
@@ -184,6 +196,8 @@ class SsdServer(
                 append("SERVER: ${android.os.Build.MODEL} UPnP/1.0 AirCast/1.0\r\n")
                 append("ST: $st\r\n")
                 append("USN: $usn\r\n")
+                append("BOOTID.UPNP.ORG: 1\r\n")
+                append("CONFIGID.UPNP.ORG: 1\r\n")
                 append("\r\n")
             }
 
@@ -199,10 +213,11 @@ class SsdServer(
 
     private fun sendAlive() {
         try {
-            val location = "http://${getLocalAddress()}:${httpPort}/description.xml"
+            val location = "http://${UpnpXmlBuilder.host.ifBlank { getLocalAddress() }}:${httpPort}/description.xml"
             val maxAge = 1800
             val server = "${android.os.Build.MODEL} UPnP/1.0 AirCast/1.0"
             val ntHeaders = listOf(
+                UpnpXmlBuilder.deviceUdn to usnUuid,
                 "upnp:rootdevice" to usnRoot,
                 UpnpXmlBuilder.DEVICE_TYPE to usnDevice,
                 UpnpXmlBuilder.SERVICE_TYPE_AVT to "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_AVT}",
@@ -220,6 +235,8 @@ class SsdServer(
                     append("NT: $nt\r\n")
                     append("NTS: ssdp:alive\r\n")
                     append("USN: $usn\r\n")
+                    append("BOOTID.UPNP.ORG: 1\r\n")
+                    append("CONFIGID.UPNP.ORG: 1\r\n")
                     append("\r\n")
                 }
                 val data = notify.toByteArray(Charsets.UTF_8)
@@ -238,8 +255,12 @@ class SsdServer(
     fun sendByeBye() {
         try {
             val ntHeaders = listOf(
+                UpnpXmlBuilder.deviceUdn to usnUuid,
                 "upnp:rootdevice" to usnRoot,
-                UpnpXmlBuilder.DEVICE_TYPE to usnDevice
+                UpnpXmlBuilder.DEVICE_TYPE to usnDevice,
+                UpnpXmlBuilder.SERVICE_TYPE_AVT to "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_AVT}",
+                UpnpXmlBuilder.SERVICE_TYPE_CM to "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_CM}",
+                UpnpXmlBuilder.SERVICE_TYPE_RCS to "${UpnpXmlBuilder.deviceUdn}::${UpnpXmlBuilder.SERVICE_TYPE_RCS}"
             )
             for ((nt, usn) in ntHeaders) {
                 val bye = buildString {
