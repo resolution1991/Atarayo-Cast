@@ -54,6 +54,15 @@ class AppPrefs(private val context: Context) {
         dataStore.edit { it[KEY_H265_ENABLED] = enabled }
     }
 
+    // Force H.265 only — experimental, default OFF for compatibility
+    val forceH265Only: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[KEY_FORCE_H265_ONLY] ?: false
+    }
+
+    suspend fun setForceH265Only(enabled: Boolean) {
+        dataStore.edit { it[KEY_FORCE_H265_ONLY] = enabled }
+    }
+
     // Keep screen on during casting
     val keepScreenOn: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[KEY_KEEP_SCREEN_ON] ?: true
@@ -120,6 +129,7 @@ class AppPrefs(private val context: Context) {
         private val KEY_DEVICE_NAME = stringPreferencesKey(Constants.KEY_DEVICE_NAME)
         private val KEY_RESOLUTION = stringPreferencesKey(Constants.KEY_RESOLUTION)
         private val KEY_H265_ENABLED = booleanPreferencesKey(Constants.KEY_H265_ENABLED)
+        private val KEY_FORCE_H265_ONLY = booleanPreferencesKey(Constants.KEY_FORCE_H265_ONLY)
         private val KEY_PIN_ENABLED = booleanPreferencesKey(Constants.KEY_PIN_ENABLED)
         private val KEY_PIN_CODE = stringPreferencesKey(Constants.KEY_PIN_CODE)
         private val KEY_BOOT_START = booleanPreferencesKey(Constants.KEY_BOOT_START)

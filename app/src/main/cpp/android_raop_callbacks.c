@@ -101,6 +101,15 @@ static void _request_video_resync(android_callback_ctx_t *ctx, JNIEnv *env, cons
     }
 }
 
+static void _notify_unsupported_video_codec(android_callback_ctx_t *ctx, JNIEnv *env, video_codec_t codec) {
+    if (!ctx->on_unsupported_video_codec) return;
+    (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_unsupported_video_codec, (jint)codec);
+    if ((*env)->ExceptionCheck(env)) {
+        LOGE("Java exception in onUnsupportedVideoCodec callback!");
+        (*env)->ExceptionClear(env);
+    }
+}
+
 /* --- Frame buffer pool --- */
 
 int android_frame_pool_init(android_callback_ctx_t *ctx, JNIEnv *env,
@@ -225,6 +234,9 @@ void android_callbacks_init(android_callback_ctx_t *ctx, JNIEnv *env, jobject ca
     (*env)->GetJavaVM(env, &ctx->jvm);
     ctx->callback_obj = (*env)->NewGlobalRef(env, callback_obj);
     ctx->h265_enabled = 1;
+    ctx->force_h265_only = 0;
+    ctx->force_h265_drop_notified = 0;
+    ctx->force_h265_drop_count = 0;
     ctx->require_pin = 0;
     ctx->registered_count = 0;
     memset(ctx->registered_keys, 0, sizeof(ctx->registered_keys));
@@ -258,6 +270,7 @@ void android_callbacks_init(android_callback_ctx_t *ctx, JNIEnv *env, jobject ca
     ctx->on_video_reset = (*env)->GetMethodID(env, cls, "onVideoReset", "(I)V");
     ctx->on_audio_flush = (*env)->GetMethodID(env, cls, "onAudioFlush", "()V");
     ctx->on_video_flush = (*env)->GetMethodID(env, cls, "onVideoFlush", "()V");
+    ctx->on_unsupported_video_codec = (*env)->GetMethodID(env, cls, "onUnsupportedVideoCodec", "(I)V");
     (*env)->DeleteLocalRef(env, cls);
 
     /* Cache ByteBuffer method IDs to avoid per-frame JNI lookups.
@@ -330,6 +343,19 @@ static int _vp_count = 0;
 static void _video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *data) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
     if (!data->data || data->data_len <= 0) return;
+    if (ctx->force_h265_only && !data->is_h265) {
+        JNIEnv *env = _get_env(ctx);
+        ctx->force_h265_drop_count++;
+        if (!ctx->force_h265_drop_notified) {
+            ctx->force_h265_drop_notified = 1;
+            LOGW("_video_process: force_h265_only=1, dropping non-H265 video frames");
+            if (env) _notify_unsupported_video_codec(ctx, env, VIDEO_CODEC_H264);
+        } else if (ctx->force_h265_drop_count % 300 == 1) {
+            LOGW("_video_process: still dropping non-H265 frames in force mode, dropped=%d",
+                 ctx->force_h265_drop_count);
+        }
+        return;
+    }
     if (data->data_len > FRAME_BUFFER_SIZE) {
         LOGE("Frame too large: %d bytes (max %d)", data->data_len, FRAME_BUFFER_SIZE);
         return;
@@ -418,6 +444,8 @@ static void _conn_init(void *cls) {
     if (!env) return;
     ctx->frame_pool_dropped = 0;
     ctx->frame_pool_needs_resync = 0;
+    ctx->force_h265_drop_notified = 0;
+    ctx->force_h265_drop_count = 0;
     _vp_count = 0;
     (*env)->CallVoidMethod(env, ctx->callback_obj, ctx->on_conn_init);
 }
@@ -590,8 +618,15 @@ static bool _check_register(void *cls, const char *pk_str) {
 
 static int _video_set_codec(void *cls, video_codec_t codec) {
     android_callback_ctx_t *ctx = (android_callback_ctx_t *)cls;
-    LOGI("video_set_codec: codec=%d (0=unknown,1=H264,2=H265) h265_enabled=%d",
-         codec, ctx->h265_enabled);
+    LOGI("video_set_codec: codec=%d (0=unknown,1=H264,2=H265) h265_enabled=%d force_h265_only=%d",
+         codec, ctx->h265_enabled, ctx->force_h265_only);
+    if (ctx->force_h265_only && codec != VIDEO_CODEC_H265) {
+        LOGW("video_set_codec: force_h265_only=1, rejecting non-H265 codec=%d", codec);
+        JNIEnv *env = _get_env(ctx);
+        if (env) _notify_unsupported_video_codec(ctx, env, codec);
+        ctx->force_h265_drop_notified = 1;
+        return -1;
+    }
     if (codec == VIDEO_CODEC_H265 && !ctx->h265_enabled) {
         LOGW("video_set_codec: H265 requested but h265_enabled=0, rejecting!");
         return -1;

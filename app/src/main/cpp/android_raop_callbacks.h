@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 #define FRAME_POOL_SIZE 24
-#define FRAME_BUFFER_SIZE (4 * 1024 * 1024)  /* 4 MB */
+#define FRAME_BUFFER_SIZE (6 * 1024 * 1024)  /* 6 MB */
 
 typedef struct {
     JavaVM *jvm;
@@ -35,7 +35,11 @@ typedef struct {
     jmethodID on_video_reset;
     jmethodID on_audio_flush;
     jmethodID on_video_flush;
+    jmethodID on_unsupported_video_codec;
     int h265_enabled;
+    int force_h265_only;
+    int force_h265_drop_notified;
+    int force_h265_drop_count;
     int require_pin;
     char *registered_keys[16];
     int registered_count;

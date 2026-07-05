@@ -72,4 +72,7 @@ interface NativeCallbacks {
 
     /** Called when video buffer should be flushed. */
     fun onVideoFlush()
+
+    /** Called when force-H.265 mode rejects a sender-selected video codec. */
+    fun onUnsupportedVideoCodec(codec: Int)
 }

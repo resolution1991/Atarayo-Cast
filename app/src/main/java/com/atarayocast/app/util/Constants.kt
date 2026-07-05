@@ -30,6 +30,7 @@ object Constants {
     const val KEY_DEVICE_NAME = "device_name"
     const val KEY_RESOLUTION = "resolution"
     const val KEY_H265_ENABLED = "h265_enabled"
+    const val KEY_FORCE_H265_ONLY = "force_h265_only"
     const val KEY_PIN_ENABLED = "pin_enabled"
     const val KEY_PIN_CODE = "pin_code"
     const val KEY_BOOT_START = "boot_start"

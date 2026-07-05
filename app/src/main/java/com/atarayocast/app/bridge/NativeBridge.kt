@@ -18,7 +18,7 @@ class NativeBridge {
     companion object {
         private const val TAG = "NativeBridge"
         private const val POOL_SIZE = 24
-        private const val BUFFER_SIZE = 4 * 1024 * 1024  // 4 MB
+        private const val BUFFER_SIZE = 6 * 1024 * 1024  // 6 MB
 
         init {
             System.loadLibrary("aircast_native")
@@ -119,6 +119,11 @@ class NativeBridge {
         nativeSetH265Enabled(nativeHandle, enabled)
     }
 
+    fun setForceH265Only(enabled: Boolean) {
+        if (!initialized.get()) return
+        nativeSetForceH265Only(nativeHandle, enabled)
+    }
+
     fun setCodecs(alac: Boolean, aac: Boolean) {
         if (!initialized.get()) return
         nativeSetCodecs(nativeHandle, alac, aac)
@@ -196,6 +201,7 @@ class NativeBridge {
     private external fun nativeDestroy(handle: Long)
     private external fun nativeSetDisplaySize(handle: Long, width: Int, height: Int, fps: Int)
     private external fun nativeSetH265Enabled(handle: Long, enabled: Boolean)
+    private external fun nativeSetForceH265Only(handle: Long, enabled: Boolean)
     private external fun nativeSetCodecs(handle: Long, alac: Boolean, aac: Boolean)
     private external fun nativeSetPinAuth(handle: Long, enabled: Boolean, pin: String)
     private external fun nativeSetPlist(handle: Long, key: String, value: Int)

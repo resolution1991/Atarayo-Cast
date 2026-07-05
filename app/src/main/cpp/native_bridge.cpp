@@ -379,6 +379,29 @@ Java_com_atarayocast_app_bridge_NativeBridge_nativeSetH265Enabled(
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_com_atarayocast_app_bridge_NativeBridge_nativeSetForceH265Only(
+        JNIEnv *env, jobject thiz, jlong handle, jboolean enabled) {
+
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    if (!ctx) return;
+    ctx->cb_ctx.force_h265_only = enabled ? 1 : 0;
+    if (enabled) {
+        ctx->cb_ctx.h265_enabled = 1;
+    }
+    LOGI("nativeSetForceH265Only: enabled=%d force_h265_only=%d h265_enabled=%d",
+         enabled ? 1 : 0, ctx->cb_ctx.force_h265_only, ctx->cb_ctx.h265_enabled);
+
+    if (enabled && ctx->dnssd) {
+        dnssd_set_airplay_features(ctx->dnssd, 42, 1);
+        uint64_t features = dnssd_get_airplay_features(ctx->dnssd);
+        LOGI("nativeSetForceH265Only: features bitmask = 0x%llX (bit 42 = %s)",
+             (unsigned long long)features,
+             (features & (1ULL << 42)) ? "SET" : "NOT SET");
+    }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_com_atarayocast_app_bridge_NativeBridge_nativeSetCodecs(
         JNIEnv *env, jobject thiz, jlong handle, jboolean alac, jboolean aac) {
 

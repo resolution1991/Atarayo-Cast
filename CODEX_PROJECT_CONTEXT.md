@@ -8,10 +8,20 @@
 - 本地源码目录：`/Users/algernon/Documents/AirCast`
 - 注意：`/Users/algernon/Documents/Cast-App` 当前只有一个空 Git 仓库，没有源码、提交或 remote。
 - 当前分支：`main`
-- 当前基线目标：`v0.3`（由本次发布提交和 tag 固化）。
+- 当前基线目标：`v0.3.1`（本地 git 提交和 tag 固化，不发布到 GitHub）。
 - v0.3 包含 Codex 修复：权限回调误启动、KeepScreenOn collector 累积、native 初始化失败处理、依赖路径配置、版本号对齐、设置页分辨率选中态、AirPlay 启动阶段块状伪影、持续投屏参考帧丢失重同步、AirPlay `maxFPS` 60fps 协商。
 - 版本定位：Android 设备作为 AirPlay 接收端和 DLNA Media Renderer。
 - 已确认构建产物：`/Users/algernon/Documents/AirCast/app/build/outputs/apk/debug/app-debug.apk`
+
+## v0.3 后本地修复记录
+
+- `v0.3.1` 本地节点范围：固化 2560x1600 黑屏修复、H.265 强制协商实验及失败保护、Apple TV sourceVersion 编译覆盖实验、设置页服务运行中锁定规则；该节点仅创建本地 commit/tag，不推送 GitHub。
+- 手动选择 `2560x1600` 后 Mac 端显示投屏成功但 Android 端黑屏：已将视频帧池和 MediaCodec 输入上限从 4MB 提升到 6MB，避免较高分辨率首个 CSD/IDR 帧在 native 或 Kotlin 层被判定过大后丢弃。
+- 同步将手动/自适应协商出来的目标分辨率预先写入 `VideoDecoder`，避免首帧早于 `onVideoSize()` 到达时用旧的 `1920x1080` fallback 配置 MediaCodec。
+- 新增默认关闭的实验设置项 `强行使用 H.265 编码`：开启后服务端会强制打开 HEVC 能力声明，并在 native `video_set_codec` 协商回调中拒绝非 H.265 codec。该选项用于验证 Mac/iOS 端是否会改用 HEVC；若发送端仍只给 H.264，投屏会连接失败或被重置，属于预期兼容性风险。
+- 修复强制 H.265 模式下发送端仍选择 H.264 时的黑屏问题：实机日志显示 `video_set_codec` 已拒绝 H.264，但 UxPlay 仍继续推送 H.264 视频帧，导致音频播放、Mac 端显示已连接、安卓端黑屏且调试层仍显示 H.264。现已在 native 视频帧入口丢弃强制模式下的非 H.265 帧，并回调 Kotlin 主动重启 RAOP HTTPD 断开该客户端，避免黑屏假连接。
+- 为验证“伪装成 Apple TV 4K 较新系统版本是否触发 HEVC”新增项目内编译覆盖 `app/src/main/cpp/aircast_global_override.h`：保持 `GLOBAL_MODEL=AppleTV6,2`，将 `GLOBAL_VERSION` 从 UxPlay 默认 `220.68` 覆盖为 `380.20.1`。该覆盖通过 CMake `-include` 注入，统一影响 DNS-SD `srcvers/vs`、RAOP `Server: AirTunes/...`、AirPlay/RAOP info 响应，不直接修改外部依赖目录 `/Users/algernon/WorkBuddy/.../aircast-deps`。
+- 设置页新增服务运行中锁定规则：当 `AirCastService` 正在运行时，灰化并禁用需要重启服务才可靠生效的设置，包括设备名称、分辨率、自适应分辨率、H.265、强制 H.265、防息屏、默认全屏、PIN 认证；设置页顶部显示“部分设置在服务进行中无法更改，请停止服务后再调整。”开机自启、画中画、调试信息保持可改。
 
 ## 技术栈
 
@@ -87,6 +97,8 @@ cd /Users/algernon/Documents/AirCast
 ./build.sh install
 ```
 
+本项目默认规则：完成构建后，将最新 APK 安装到测试机。当前默认测试机为 `192.168.31.212:45523`（`Lenovo_YT_K606F`）；若 ADB 地址变化，先用 `adb devices -l` 重新确认。
+
 构建脚本会设置：
 
 - `JAVA_HOME=/Applications/Android Studio.app/Contents/jbr/Contents/Home`
@@ -159,7 +171,7 @@ adb -s 192.168.31.212:45523 logcat -s AirCastService MainActivity NativeBridge V
 1. 真机验证闭环：构建通过不等于投屏链路稳定，需要按 AirPlay、DLNA、音频、断开重连、后台/PiP 分场景验证。
 2. Android 兼容性：处理 deprecated API，尤其是显示尺寸、全屏沉浸、通知权限和后台启动限制。
 3. 日志与诊断：为 RAOP 连接、解码器重建、DLNA SOAP 错误和 mDNS 注册失败整理可复用排障命令。
-4. 发布配置：当前 debug/release 元数据已对齐到 `versionName = "0.3"`、`versionCode = 3`；后续每次 tag/release 仍需同步更新。
+4. 发布配置：当前 debug/release 元数据已对齐到 `versionName = "0.3.1"`、`versionCode = 4`；后续每次 tag/release 仍需同步更新。
 5. 依赖授权：项目因 UxPlay 使用 GPL-3.0，发布前需要确保 LICENSE、源码提供方式和第三方依赖声明完整。
 
 ## 常用命令

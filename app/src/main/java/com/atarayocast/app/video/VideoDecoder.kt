@@ -37,7 +37,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
 
     companion object {
         private const val TAG = "VideoDecoder"
-        private const val MAX_FRAME_SIZE = 4 * 1024 * 1024  // 4 MB
+        private const val MAX_FRAME_SIZE = 6 * 1024 * 1024  // 6 MB
         private const val VERBOSE = false
         private const val STARTUP_OUTPUT_DROP_COUNT = 2
         private const val MAX_PENDING_FRAMES = 8

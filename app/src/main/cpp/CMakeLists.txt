@@ -152,6 +152,10 @@ target_compile_definitions(aircast_native PRIVATE
     TARGET_RT_LITTLE_ENDIAN=1
 )
 
+target_compile_options(aircast_native PRIVATE
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/aircast_global_override.h
+)
+
 target_link_libraries(aircast_native
     llhttp
     playfair

@@ -40,7 +40,7 @@ Android 设备作为 AirPlay 接收端和 DLNA Media Renderer，接收来自 mac
 
 ### 性能优化 (v0.2 / v0.3)
 
-- **DirectByteBuffer 帧池** — 24 x 4MB 预分配缓冲区（v0.1: 8 个），零 per-frame 内存分配
+- **DirectByteBuffer 帧池** — 24 x 6MB 预分配缓冲区（v0.1: 8 个），零 per-frame 内存分配
 - **MediaCodec 异步回调** — 无轮询，codec 就绪时自动拉取帧
 - **IDR 关键帧保护** — Kotlin + C 双层保护，IDR 帧池满时 sem_timedwait 等待 15ms，非 IDR 帧立即丢弃
 - **顺序有界解码队列** — Kotlin 侧最多缓存 8 帧并保持 decode order，避免覆盖参考帧导致持续宏块伪影
@@ -133,7 +133,7 @@ UxPlay RAOP (C)
   │ ↓ IDR: sem_timedwait(15ms)  非 IDR: sem_trywait(立即丢弃)
   │ ↓ 池满丢帧: onVideoReset(1001) + 抑制非 IDR 直到下一帧 IDR
   ▼
-Frame Pool (24 x 4MB DirectByteBuffer)
+Frame Pool (24 x 6MB DirectByteBuffer)
   │ memcpy → ByteBuffer (JNI 方法 ID 已缓存)
   ▼
 NativeCallbacks.onVideoData() [Kotlin]
@@ -463,6 +463,7 @@ Atarayo-Cast/
 | v0.1 | 2026-07-04 | 基线版本：AirPlay + DLNA + 全部功能 |
 | v0.2 | 2026-07-04 | 视频优化 + 音量控制 + UI 增强 + Bug 修复 |
 | v0.3 | 2026-07-04 | 60fps 协商 + 启动/持续伪影修复 + 开发环境可移植性 |
+| v0.3.1 | 2026-07-05 | 高分辨率黑屏修复 + H.265 协商实验保护 + 设置页运行中锁定 |
 
 ---
 

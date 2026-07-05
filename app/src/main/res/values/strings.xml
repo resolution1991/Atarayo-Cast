@@ -29,6 +29,7 @@
     <!-- Settings -->
     <string name="settings_title">设置</string>
     <string name="settings_resolution">分辨率</string>
+    <string name="settings_service_running_hint">部分设置在服务进行中无法更改，请停止服务后再调整。</string>
     <string name="settings_resolution_auto">自动 (自适应屏幕)</string>
     <string name="settings_resolution_720p">720p</string>
     <string name="settings_resolution_1080p">1080p</string>
@@ -45,6 +46,8 @@
     <string name="settings_debug">调试信息</string>
     <string name="settings_h265">H.265/HEVC</string>
     <string name="settings_h265_desc">启用 HEVC 编码支持 (4K 投屏)</string>
+    <string name="settings_force_h265">强行使用 H.265 编码</string>
+    <string name="settings_force_h265_desc">实验：拒绝 H.264 投屏；部分 Mac/iPhone/iPad 可能无法连接</string>
 
     <!-- Debug -->
     <string name="debug_fps">FPS: %1$d</string>

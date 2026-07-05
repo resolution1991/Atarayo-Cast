@@ -35,6 +35,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 import android.os.Binder
 
@@ -43,6 +44,7 @@ class AirCastService : Service(), NativeCallbacks {
     companion object {
         private const val TAG = "AirCastService"
         private const val VIDEO_RESET_FRAME_DROPPED = 1001
+        private const val VIDEO_CODEC_H264 = 1
 
         fun start(context: Context) {
             val intent = Intent(context, AirCastService::class.java).apply {
@@ -90,6 +92,8 @@ class AirCastService : Service(), NativeCallbacks {
     private var frameCount = 0L
     private var frameBytes = 0L
     private var lastFpsReset = 0L
+    @Volatile private var forceH265OnlyActive = false
+    private val unsupportedCodecDisconnectScheduled = AtomicBoolean(false)
 
     // Phase 3: WakeLock
     private var wakeLock: PowerManager.WakeLock? = null
@@ -173,6 +177,10 @@ class AirCastService : Service(), NativeCallbacks {
             try {
                 val deviceName = prefs.deviceName.first()
                 val h265Enabled = prefs.h265Enabled.first()
+                val forceH265Only = prefs.forceH265Only.first()
+                val effectiveH265Enabled = h265Enabled || forceH265Only
+                forceH265OnlyActive = forceH265Only
+                unsupportedCodecDisconnectScheduled.set(false)
                 val pinEnabled = prefs.pinEnabled.first()
                 val pinCode = if (pinEnabled) prefs.pinCode.first() else ""
                 val keepScreenOn = prefs.keepScreenOn.first()
@@ -195,8 +203,10 @@ class AirCastService : Service(), NativeCallbacks {
                     return@launch
                 }
 
-                nativeBridge.setH265Enabled(h265Enabled)
-                nativeBridge.setCodecs(alac = true, aac = h265Enabled) // AAC supported via MediaCodec
+                nativeBridge.setH265Enabled(effectiveH265Enabled)
+                nativeBridge.setForceH265Only(forceH265Only)
+                nativeBridge.setCodecs(alac = true, aac = effectiveH265Enabled) // AAC supported via MediaCodec
+                Log.i(TAG, "Codec options: h265Enabled=$h265Enabled forceH265Only=$forceH265Only effectiveH265Enabled=$effectiveH265Enabled")
 
                 // Apply custom PIN if enabled (overrides random PIN from init)
                 if (pinEnabled && pinCode.isNotEmpty()) {
@@ -205,10 +215,11 @@ class AirCastService : Service(), NativeCallbacks {
                 }
 
                 // ---- Resolution: adaptive or manual ----
-                if (adaptRes) {
+                val displaySize = if (adaptRes) {
                     val ds = detectDeviceResolution()
                     nativeBridge.setDisplaySize(ds.width, ds.height, ds.fps)
                     Log.i(TAG, "Adaptive resolution: ${ds.width}x${ds.height}@${ds.fps}fps")
+                    ds
                 } else {
                     val res = Constants.Resolution.fromKey(resKey)
                     if (res.width > 0 && res.height > 0) {
@@ -216,13 +227,20 @@ class AirCastService : Service(), NativeCallbacks {
                         // Sender outputs at requested res; MediaCodec handles scaling.
                         nativeBridge.setDisplaySize(res.width, res.height, res.fps)
                         Log.i(TAG, "Fixed resolution: ${res.key} (${res.width}x${res.height}@${res.fps}fps)")
+                        DisplaySize(res.width, res.height, res.fps)
                     } else {
                         // Fallback: AUTO somehow stored in manual mode
                         val ds = detectDeviceResolution()
                         nativeBridge.setDisplaySize(ds.width, ds.height, ds.fps)
                         Log.w(TAG, "AUTO resolution in manual mode — falling back to adaptive: ${ds.width}x${ds.height}@${ds.fps}fps")
+                        ds
                     }
                 }
+                // Prime MediaCodec with the negotiated display size. Some AirPlay
+                // sessions deliver the first IDR before the native video-size
+                // callback; using the old 1920x1080 fallback can leave high
+                // resolutions such as 2560x1600 connected but black.
+                videoDecoder.setSize(displaySize.width, displaySize.height)
 
                 serverPort = nativeBridge.start(Constants.RAOP_PORT)
                 if (serverPort > 0) {
@@ -330,6 +348,12 @@ class AirCastService : Service(), NativeCallbacks {
     // ---- NativeCallbacks ----
 
     override fun onVideoData(data: ByteBuffer, ntpTime: Long, isH265: Boolean) {
+        if (forceH265OnlyActive && !isH265) {
+            nativeBridge.returnFrameBuffer(data)
+            onUnsupportedVideoCodec(VIDEO_CODEC_H264)
+            return
+        }
+
         val size = data.limit()
         videoDecoder.decodeFrame(data, isH265, ntpTime)
 
@@ -399,6 +423,7 @@ class AirCastService : Service(), NativeCallbacks {
         Log.i(TAG, "Client connected")
         frameCount = 0; frameBytes = 0; lastFpsReset = 0
         debugFps = 0; debugBitrate = 0f; debugCodec = "-"; debugResW = 0; debugResH = 0
+        unsupportedCodecDisconnectScheduled.set(false)
         state = Constants.ConnectionState.CONNECTED
         updateNotification(getString(R.string.status_connected))
         broadcastState()
@@ -416,6 +441,30 @@ class AirCastService : Service(), NativeCallbacks {
     override fun onConnectionReset(reason: Int) {
         Log.i(TAG, "Connection reset: reason=$reason")
         audioPlayer.flush()
+    }
+
+    override fun onUnsupportedVideoCodec(codec: Int) {
+        if (!forceH265OnlyActive) return
+        val codecName = if (codec == VIDEO_CODEC_H264) "H.264" else "codec=$codec"
+        if (!unsupportedCodecDisconnectScheduled.compareAndSet(false, true)) return
+
+        Log.w(TAG, "Force H.265 only: sender selected $codecName, disconnecting client")
+        serviceScope.launch {
+            debugFps = 0
+            debugBitrate = 0f
+            debugCodec = "拒绝 $codecName"
+            frameCount = 0
+            frameBytes = 0
+            lastFpsReset = 0
+            videoDecoder.stop()
+            audioPlayer.stop()
+            if (serverPort > 0 && nativeBridge.isRunning) {
+                nativeBridge.restartHttpd(serverPort)
+            }
+            state = Constants.ConnectionState.WAITING
+            updateNotification(getString(R.string.status_waiting))
+            broadcastState()
+        }
     }
 
     override fun onDisplayPin(pin: String) {
