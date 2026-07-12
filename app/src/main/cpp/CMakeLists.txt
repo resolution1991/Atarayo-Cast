@@ -4,6 +4,14 @@ project(aircast_native C CXX)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
 
+# Android 15+ devices may use 16 KiB memory pages. Apply the linker page-size
+# envelope globally so it also reaches OpenSSL through CMAKE_MODULE_LINKER_FLAGS.
+if(ANDROID)
+    set(AIRCAST_16K_LINKER_FLAG "-Wl,-z,max-page-size=16384")
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " ${AIRCAST_16K_LINKER_FLAG}")
+    string(APPEND CMAKE_MODULE_LINKER_FLAGS " ${AIRCAST_16K_LINKER_FLAG}")
+endif()
+
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffile-prefix-map=${CMAKE_SOURCE_DIR}=. -ffile-prefix-map=${CMAKE_BINARY_DIR}=. -ffile-prefix-map=${ANDROID_NDK}=.")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -frtti -ffile-prefix-map=${CMAKE_SOURCE_DIR}=. -ffile-prefix-map=${CMAKE_BINARY_DIR}=. -ffile-prefix-map=${ANDROID_NDK}=.")
 

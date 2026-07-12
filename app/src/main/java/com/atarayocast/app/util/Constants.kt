@@ -55,8 +55,8 @@ object Constants {
     }
 
     // Resolutions — comprehensive list with common aspect ratios.
-    // Manual mode does NOT cap at device resolution; the sender can output any
-    // resolution MediaCodec supports.
+    // The selected size is constrained at runtime to the local H.264 decoder's
+    // advertised envelope before it is sent to the AirPlay client.
     //
     // FPS is auto-computed: 30fps for 4K+, 60fps otherwise.
     enum class Resolution(

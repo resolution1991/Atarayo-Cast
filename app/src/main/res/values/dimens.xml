@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="media_control_margin">12dp</dimen>
+    <dimen name="debug_overlay_margin">12dp</dimen>
+    <dimen name="debug_overlay_top_margin">88dp</dimen>
+</resources>

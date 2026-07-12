@@ -1,184 +1,364 @@
 package com.atarayocast.app
 
+import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
-import android.view.MenuItem
+import android.text.InputFilter
+import android.text.InputType
 import android.view.View
-import android.widget.TextView
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.LinearLayout
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.materialswitch.MaterialSwitch
 import com.atarayocast.app.data.AppPrefs
-import com.atarayocast.app.util.Constants
+import com.atarayocast.app.databinding.ActivitySettingsBinding
 import com.atarayocast.app.service.AirCastService
+import com.atarayocast.app.util.Constants
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.snackbar.Snackbar
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/**
- * Settings activity for managing all AirCast preferences.
- *
- * Covers: device name, resolution, H.265, forced H.265, PIN code, password,
- * keep screen on, boot start, PiP, fullscreen default, debug overlay.
- */
 class SettingsActivity : AppCompatActivity() {
 
-    companion object {
-        private const val TAG = "SettingsActivity"
-    }
-
+    private lateinit var binding: ActivitySettingsBinding
     private lateinit var prefs: AppPrefs
-
-    // UI references
-    private lateinit var tvServiceRunningHint: TextView
-    private lateinit var rowDeviceName: View
-    private lateinit var rowResolution: View
-    private lateinit var rowAdaptiveRes: View
-    private lateinit var rowH265: View
-    private lateinit var rowForceH265: View
-    private lateinit var rowKeepScreenOn: View
-    private lateinit var rowFullscreenDefault: View
-    private lateinit var rowPin: View
-    private lateinit var tvDeviceName: TextView
-    private lateinit var tvResolution: TextView
-    private lateinit var swH265: MaterialSwitch
-    private lateinit var swForceH265: MaterialSwitch
-    private lateinit var swAdaptiveRes: MaterialSwitch
-    private lateinit var swKeepScreenOn: MaterialSwitch
-    private lateinit var swFullscreenDefault: MaterialSwitch
-    private lateinit var swPin: MaterialSwitch
-    private lateinit var swBootStart: MaterialSwitch
-    private lateinit var swPip: MaterialSwitch
-    private lateinit var swDebug: MaterialSwitch
-    private var selectedResolutionKey: String = Constants.Resolution.AUTO.key
+    private var selectedResolutionKey = Constants.Resolution.AUTO.key
     private var serviceRunning = false
     private var adaptiveResolutionEnabled = true
+    private var suppressSwitchChanges = false
 
     private val stateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val stateName = intent.getStringExtra(Constants.EXTRA_STATE) ?: return
-            val state = runCatching { Constants.ConnectionState.valueOf(stateName) }.getOrNull()
-            applyServiceRunning(state != null && state != Constants.ConnectionState.IDLE)
+            val state = intent.getStringExtra(Constants.EXTRA_STATE)
+                ?.let { runCatching { Constants.ConnectionState.valueOf(it) }.getOrNull() }
+                ?: return
+            applyServiceRunning(state != Constants.ConnectionState.IDLE)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_settings)
-
-        supportActionBar?.apply {
-            title = getString(R.string.settings_title)
-            setDisplayHomeAsUpEnabled(true)
-        }
-
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        binding = ActivitySettingsBinding.inflate(layoutInflater)
+        setContentView(binding.root)
         prefs = AppPrefs(this)
 
-        // Bind views
-        tvServiceRunningHint = findViewById(R.id.tvServiceRunningHint)
-        rowDeviceName = findViewById(R.id.rowDeviceName)
-        rowResolution = findViewById(R.id.rowResolution)
-        rowAdaptiveRes = findViewById(R.id.rowAdaptiveRes)
-        rowH265 = findViewById(R.id.rowH265)
-        rowForceH265 = findViewById(R.id.rowForceH265)
-        rowKeepScreenOn = findViewById(R.id.rowKeepScreenOn)
-        rowFullscreenDefault = findViewById(R.id.rowFullscreenDefault)
-        rowPin = findViewById(R.id.rowPin)
-        tvDeviceName = findViewById(R.id.tvDeviceName)
-        tvResolution = findViewById(R.id.tvResolution)
-        swH265 = findViewById(R.id.swH265)
-        swForceH265 = findViewById(R.id.swForceH265)
-        swAdaptiveRes = findViewById(R.id.swAdaptiveRes)
-        swKeepScreenOn = findViewById(R.id.swKeepScreenOn)
-        swFullscreenDefault = findViewById(R.id.swFullscreenDefault)
-        swPin = findViewById(R.id.swPin)
-        swBootStart = findViewById(R.id.swBootStart)
-        swPip = findViewById(R.id.swPip)
-        swDebug = findViewById(R.id.swDebug)
+        setupEdgeToEdge()
+        setupNavigation()
+        setupInteractions()
+        loadPreferences()
+        applyServiceRunning(isServiceRunning())
+    }
 
-        // Load current values
-        lifecycleScope.launch {
-            tvDeviceName.text = prefs.deviceName.first()
-            selectedResolutionKey = prefs.resolution.first()
-            val res = Constants.Resolution.fromKey(selectedResolutionKey)
-            tvResolution.text = res.displayLabel
-            swH265.isChecked = prefs.h265Enabled.first()
-            swForceH265.isChecked = prefs.forceH265Only.first()
-            adaptiveResolutionEnabled = prefs.adaptiveResolution.first()
-            swAdaptiveRes.isChecked = adaptiveResolutionEnabled
-            swKeepScreenOn.isChecked = prefs.keepScreenOn.first()
-            swFullscreenDefault.isChecked = prefs.fullscreenDefault.first()
-            swPin.isChecked = prefs.pinEnabled.first()
-            swBootStart.isChecked = prefs.bootStart.first()
-            swPip.isChecked = prefs.pipEnabled.first()
-            swDebug.isChecked = prefs.debugOverlay.first()
-            updateRestartRequiredSettings()
+    private fun setupEdgeToEdge() {
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
         }
 
-        // ---- Click listeners ----
+        ViewCompat.setOnApplyWindowInsetsListener(binding.settingsToolbar) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.updatePadding(top = bars.top)
+            insets
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(binding.settingsScroll) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.navigationBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.updatePadding(bottom = bars.bottom)
+            insets
+        }
+    }
 
-        rowDeviceName.setOnClickListener {
+    private fun setupNavigation() {
+        binding.settingsToolbar.navigationContentDescription = getString(R.string.btn_back)
+        binding.settingsToolbar.setNavigationOnClickListener {
+            onBackPressedDispatcher.onBackPressed()
+        }
+    }
+
+    private fun setupInteractions() {
+        binding.rowDeviceName.setOnClickListener {
             if (!serviceRunning) showDeviceNameDialog()
         }
-
-        rowResolution.setOnClickListener {
-            if (!serviceRunning && !swAdaptiveRes.isChecked) {
-                showResolutionDialog()
-            }
+        binding.rowResolution.setOnClickListener {
+            if (!serviceRunning && !binding.swAdaptiveRes.isChecked) showResolutionDialog()
         }
 
-        swAdaptiveRes.setOnCheckedChangeListener { _, checked ->
+        bindRowToSwitch(binding.rowAdaptiveRes, binding.swAdaptiveRes)
+        bindRowToSwitch(binding.rowH265, binding.swH265)
+        bindRowToSwitch(binding.rowForceH265, binding.swForceH265)
+        bindRowToSwitch(binding.rowKeepScreenOn, binding.swKeepScreenOn)
+        bindRowToSwitch(binding.rowFullscreenDefault, binding.swFullscreenDefault)
+        bindRowToSwitch(binding.rowPin, binding.swPin)
+        bindRowToSwitch(binding.rowBootStart, binding.swBootStart)
+        bindRowToSwitch(binding.rowPip, binding.swPip)
+        bindRowToSwitch(binding.rowDebug, binding.swDebug)
+
+        binding.swAdaptiveRes.setOnCheckedChangeListener { _, checked ->
+            if (suppressSwitchChanges) return@setOnCheckedChangeListener
             adaptiveResolutionEnabled = checked
             lifecycleScope.launch { prefs.setAdaptiveResolution(checked) }
             updateRestartRequiredSettings()
         }
-
-        swH265.setOnCheckedChangeListener { _, checked ->
+        binding.swH265.setOnCheckedChangeListener { _, checked ->
+            if (suppressSwitchChanges) return@setOnCheckedChangeListener
             lifecycleScope.launch { prefs.setH265Enabled(checked) }
-            if (!checked && swForceH265.isChecked) {
-                swForceH265.isChecked = false
+            if (!checked && binding.swForceH265.isChecked) {
+                binding.swForceH265.isChecked = false
             }
         }
-
-        swForceH265.setOnCheckedChangeListener { _, checked ->
+        binding.swForceH265.setOnCheckedChangeListener { _, checked ->
+            if (suppressSwitchChanges) return@setOnCheckedChangeListener
             lifecycleScope.launch { prefs.setForceH265Only(checked) }
-            if (checked && !swH265.isChecked) {
-                swH265.isChecked = true
+            if (checked && !binding.swH265.isChecked) binding.swH265.isChecked = true
+        }
+        binding.swKeepScreenOn.setOnCheckedChangeListener { _, checked ->
+            if (!suppressSwitchChanges) lifecycleScope.launch { prefs.setKeepScreenOn(checked) }
+        }
+        binding.swFullscreenDefault.setOnCheckedChangeListener { _, checked ->
+            if (!suppressSwitchChanges) lifecycleScope.launch { prefs.setFullscreenDefault(checked) }
+        }
+        binding.swPin.setOnCheckedChangeListener { _, checked ->
+            if (suppressSwitchChanges) return@setOnCheckedChangeListener
+            if (checked) {
+                setSwitchChecked(binding.swPin, false)
+                showPinDialog()
+            } else {
+                lifecycleScope.launch { prefs.setPinEnabled(false) }
             }
         }
-
-        swKeepScreenOn.setOnCheckedChangeListener { _, checked ->
-            lifecycleScope.launch { prefs.setKeepScreenOn(checked) }
+        binding.swBootStart.setOnCheckedChangeListener { _, checked ->
+            if (!suppressSwitchChanges) lifecycleScope.launch { prefs.setBootStart(checked) }
+        }
+        binding.swPip.setOnCheckedChangeListener { _, checked ->
+            if (!suppressSwitchChanges) lifecycleScope.launch { prefs.setPipEnabled(checked) }
+        }
+        binding.swDebug.setOnCheckedChangeListener { _, checked ->
+            if (!suppressSwitchChanges) lifecycleScope.launch { prefs.setDebugOverlay(checked) }
         }
 
-        swFullscreenDefault.setOnCheckedChangeListener { _, checked ->
-            lifecycleScope.launch { prefs.setFullscreenDefault(checked) }
+        binding.btnStopServiceFromSettings.setOnClickListener {
+            AirCastService.stop(this)
+            applyServiceRunning(false)
+            Snackbar.make(
+                binding.root,
+                R.string.settings_service_stopped_ready,
+                Snackbar.LENGTH_LONG
+            ).show()
         }
-
-        swPin.setOnCheckedChangeListener { _, checked ->
-            lifecycleScope.launch {
-                prefs.setPinEnabled(checked)
-                if (checked) showPinDialog()
-            }
-        }
-
-        swBootStart.setOnCheckedChangeListener { _, checked ->
-            lifecycleScope.launch { prefs.setBootStart(checked) }
-        }
-
-        swPip.setOnCheckedChangeListener { _, checked ->
-            lifecycleScope.launch { prefs.setPipEnabled(checked) }
-        }
-
-        swDebug.setOnCheckedChangeListener { _, checked ->
-            lifecycleScope.launch { prefs.setDebugOverlay(checked) }
-        }
-
-        applyServiceRunning(isServiceRunning())
     }
+
+    private fun bindRowToSwitch(row: View, switch: MaterialSwitch) {
+        row.setOnClickListener {
+            if (row.isEnabled && switch.isEnabled) switch.toggle()
+        }
+    }
+
+    private fun loadPreferences() {
+        lifecycleScope.launch {
+            suppressSwitchChanges = true
+            binding.tvDeviceName.text = prefs.deviceName.first()
+            selectedResolutionKey = prefs.resolution.first()
+            binding.tvResolution.text = Constants.Resolution.fromKey(selectedResolutionKey).displayLabel
+            binding.swH265.isChecked = prefs.h265Enabled.first()
+            binding.swForceH265.isChecked = prefs.forceH265Only.first()
+            adaptiveResolutionEnabled = prefs.adaptiveResolution.first()
+            binding.swAdaptiveRes.isChecked = adaptiveResolutionEnabled
+            binding.swKeepScreenOn.isChecked = prefs.keepScreenOn.first()
+            binding.swFullscreenDefault.isChecked = prefs.fullscreenDefault.first()
+            binding.swPin.isChecked = prefs.pinEnabled.first()
+            binding.swBootStart.isChecked = prefs.bootStart.first()
+            binding.swPip.isChecked = prefs.pipEnabled.first()
+            binding.swDebug.isChecked = prefs.debugOverlay.first()
+            suppressSwitchChanges = false
+            updateRestartRequiredSettings()
+        }
+    }
+
+    private fun showDeviceNameDialog() {
+        val inputLayout = createTextInputLayout(getString(R.string.dialog_device_name_hint))
+        val input = TextInputEditText(this).apply {
+            setSingleLine(true)
+            setText(binding.tvDeviceName.text)
+            selectAll()
+        }
+        inputLayout.addView(
+            input,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.device_name_label)
+            .setView(wrapDialogField(inputLayout))
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val name = input.text?.toString()?.trim().orEmpty()
+                    .ifBlank { getString(R.string.device_name_default) }
+                binding.tvDeviceName.text = name
+                lifecycleScope.launch { prefs.setDeviceName(name) }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showResolutionDialog() {
+        val resolutions = Constants.Resolution.entries.filter { it != Constants.Resolution.AUTO }
+        val items = resolutions.map { it.displayLabel }.toTypedArray()
+        val checked = resolutions.indexOfFirst { it.key == selectedResolutionKey }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.settings_resolution)
+            .setSingleChoiceItems(items, checked) { dialog, which ->
+                val resolution = resolutions[which]
+                selectedResolutionKey = resolution.key
+                binding.tvResolution.text = resolution.displayLabel
+                lifecycleScope.launch { prefs.setResolution(resolution.key) }
+                dialog.dismiss()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showPinDialog() {
+        val inputLayout = createTextInputLayout(getString(R.string.dialog_pin_hint)).apply {
+            endIconMode = TextInputLayout.END_ICON_PASSWORD_TOGGLE
+        }
+        val input = TextInputEditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            filters = arrayOf(InputFilter.LengthFilter(4))
+            setSingleLine(true)
+        }
+        inputLayout.addView(
+            input,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dialog_pin_title)
+            .setMessage(R.string.dialog_pin_message)
+            .setView(wrapDialogField(inputLayout))
+            .setPositiveButton(android.R.string.ok, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val pin = input.text?.toString()?.trim().orEmpty()
+                if (pin.length != 4 || pin.any { !it.isDigit() }) {
+                    inputLayout.error = getString(R.string.dialog_pin_error)
+                    return@setOnClickListener
+                }
+                inputLayout.error = null
+                lifecycleScope.launch {
+                    prefs.setPinCode(pin)
+                    prefs.setPinEnabled(true)
+                }
+                setSwitchChecked(binding.swPin, true)
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun createTextInputLayout(fieldHint: String): TextInputLayout =
+        TextInputLayout(this).apply {
+            hint = fieldHint
+            boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+        }
+
+    private fun wrapDialogField(field: View): View {
+        return FrameLayout(this).apply {
+            val horizontal = dp(24)
+            val top = dp(8)
+            addView(
+                field,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    leftMargin = horizontal
+                    rightMargin = horizontal
+                    topMargin = top
+                }
+            )
+            setPadding(0, 0, 0, dp(4))
+        }
+    }
+
+    private fun applyServiceRunning(running: Boolean) {
+        serviceRunning = running
+        updateRestartRequiredSettings()
+    }
+
+    private fun updateRestartRequiredSettings() {
+        val canEdit = !serviceRunning
+        binding.serviceRunningBanner.visibility = if (serviceRunning) View.VISIBLE else View.GONE
+
+        listOf(
+            binding.rowDeviceName,
+            binding.rowAdaptiveRes,
+            binding.rowH265,
+            binding.rowForceH265,
+            binding.rowKeepScreenOn,
+            binding.rowPin
+        ).forEach { setRowEnabled(it, canEdit) }
+
+        binding.swAdaptiveRes.isEnabled = canEdit
+        binding.swH265.isEnabled = canEdit
+        binding.swForceH265.isEnabled = canEdit
+        binding.swKeepScreenOn.isEnabled = canEdit
+        binding.swPin.isEnabled = canEdit
+        setResolutionRowEnabled(canEdit && !adaptiveResolutionEnabled)
+    }
+
+    private fun setResolutionRowEnabled(enabled: Boolean) {
+        setRowEnabled(binding.rowResolution, enabled)
+        binding.tvResolution.isEnabled = enabled
+    }
+
+    private fun setRowEnabled(row: View, enabled: Boolean) {
+        row.isEnabled = enabled
+        row.isClickable = enabled
+        row.alpha = if (enabled) 1f else 0.42f
+    }
+
+    private fun setSwitchChecked(switch: MaterialSwitch, checked: Boolean) {
+        suppressSwitchChanges = true
+        switch.isChecked = checked
+        suppressSwitchChanges = false
+    }
+
+    private fun isServiceRunning(): Boolean {
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        @Suppress("DEPRECATION")
+        return activityManager.getRunningServices(Integer.MAX_VALUE).any {
+            it.service.className == AirCastService::class.java.name
+        }
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onResume() {
         super.onResume()
@@ -195,123 +375,8 @@ class SettingsActivity : AppCompatActivity() {
         super.onPause()
         try {
             unregisterReceiver(stateReceiver)
-        } catch (e: IllegalArgumentException) {
-            // Receiver may not have been registered if the Activity was paused during setup.
+        } catch (_: IllegalArgumentException) {
+            // The receiver may not have completed registration during a fast transition.
         }
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        if (item.itemId == android.R.id.home) {
-            finish()
-            return true
-        }
-        return super.onOptionsItemSelected(item)
-    }
-
-    // ---- Dialogs ----
-
-    private fun showDeviceNameDialog() {
-        val input = android.widget.EditText(this)
-        input.setText(tvDeviceName.text)
-        input.setSingleLine()
-
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.device_name_label))
-            .setView(input)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                val name = input.text.toString().trim().ifEmpty { "AirCast-Android" }
-                tvDeviceName.text = name
-                lifecycleScope.launch { prefs.setDeviceName(name) }
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
-    }
-
-    private fun showResolutionDialog() {
-        val resolutions = Constants.Resolution.entries.filter { it != Constants.Resolution.AUTO }
-        val items = resolutions.map { it.displayLabel }.toTypedArray()
-        val current = Constants.Resolution.fromKey(selectedResolutionKey)
-        val checked = resolutions.indexOfFirst { it.key == current.key }
-
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.settings_resolution))
-            .setSingleChoiceItems(items, checked) { dialog, which ->
-                val res = resolutions[which]
-                selectedResolutionKey = res.key
-                tvResolution.text = res.displayLabel
-                lifecycleScope.launch { prefs.setResolution(res.key) }
-                dialog.dismiss()
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
-    }
-
-    private fun applyServiceRunning(running: Boolean) {
-        serviceRunning = running
-        updateRestartRequiredSettings()
-    }
-
-    private fun updateRestartRequiredSettings() {
-        val canEditRestartRequired = !serviceRunning
-        tvServiceRunningHint.visibility = if (serviceRunning) View.VISIBLE else View.GONE
-
-        listOf(
-            rowDeviceName,
-            rowAdaptiveRes,
-            rowH265,
-            rowForceH265,
-            rowKeepScreenOn,
-            rowFullscreenDefault,
-            rowPin
-        ).forEach { setRowEnabled(it, canEditRestartRequired) }
-
-        swAdaptiveRes.isEnabled = canEditRestartRequired
-        swH265.isEnabled = canEditRestartRequired
-        swForceH265.isEnabled = canEditRestartRequired
-        swKeepScreenOn.isEnabled = canEditRestartRequired
-        swFullscreenDefault.isEnabled = canEditRestartRequired
-        swPin.isEnabled = canEditRestartRequired
-
-        setResolutionRowEnabled(canEditRestartRequired && !adaptiveResolutionEnabled)
-    }
-
-    private fun setResolutionRowEnabled(enabled: Boolean) {
-        setRowEnabled(rowResolution, enabled)
-        tvResolution.isEnabled = enabled
-    }
-
-    private fun setRowEnabled(row: View, enabled: Boolean) {
-        row.isEnabled = enabled
-        row.isClickable = enabled
-        row.alpha = if (enabled) 1.0f else 0.45f
-    }
-
-    private fun isServiceRunning(): Boolean {
-        val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-        @Suppress("DEPRECATION")
-        return am.getRunningServices(Integer.MAX_VALUE).any {
-            it.service.className == AirCastService::class.java.name
-        }
-    }
-
-    private fun showPinDialog() {
-        val input = android.widget.EditText(this)
-        input.setHint("0000")
-        input.setSingleLine()
-        input.inputType = android.text.InputType.TYPE_CLASS_NUMBER or
-                android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
-
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.settings_pin))
-            .setMessage("Set 4-digit PIN code")
-            .setView(input)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                val pin = input.text.toString().trim()
-                if (pin.length == 4 && pin.all { it.isDigit() }) {
-                    lifecycleScope.launch { prefs.setPinCode(pin) }
-                }
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
     }
 }

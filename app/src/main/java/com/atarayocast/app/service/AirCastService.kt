@@ -98,6 +98,12 @@ class AirCastService : Service(), NativeCallbacks {
         private set
     @Volatile var debugResH: Int = 0
         private set
+    @Volatile var debugNegotiatedWidth: Int = 0
+        private set
+    @Volatile var debugNegotiatedHeight: Int = 0
+        private set
+    @Volatile var debugNegotiatedFps: Int = 0
+        private set
     private var frameCount = 0L
     private var frameBytes = 0L
     private var lastFpsReset = 0L
@@ -111,6 +117,8 @@ class AirCastService : Service(), NativeCallbacks {
 
     inner class LocalBinder : Binder() {
         fun getService(): AirCastService = this@AirCastService
+        fun getConnectionState(): Constants.ConnectionState = state
+        fun getActiveProtocol(): Constants.Protocol? = activeProtocol
         fun setSurface(surface: Surface?) {
             videoDecoder.setSurface(surface)
             dlnaManager.setSurface(surface)
@@ -202,8 +210,12 @@ class AirCastService : Service(), NativeCallbacks {
                 val deviceName = prefs.deviceName.first()
                 val h265Enabled = prefs.h265Enabled.first()
                 val forceH265Only = prefs.forceH265Only.first()
-                val effectiveH265Enabled = h265Enabled || forceH265Only
-                forceH265OnlyActive = forceH265Only
+                val h265DecoderAvailable = videoDecoder.supportsMime(VideoDecoder.MIME_HEVC)
+                val effectiveH265Enabled = (h265Enabled || forceH265Only) && h265DecoderAvailable
+                forceH265OnlyActive = forceH265Only && h265DecoderAvailable
+                if ((h265Enabled || forceH265Only) && !h265DecoderAvailable) {
+                    Log.w(TAG, "HEVC is enabled in preferences but no local HEVC decoder is available; using H.264 only")
+                }
                 unsupportedCodecDisconnectScheduled.set(false)
                 val pinEnabled = prefs.pinEnabled.first()
                 val pinCode = if (pinEnabled) prefs.pinCode.first() else ""
@@ -228,9 +240,9 @@ class AirCastService : Service(), NativeCallbacks {
                 }
 
                 nativeBridge.setH265Enabled(effectiveH265Enabled)
-                nativeBridge.setForceH265Only(forceH265Only)
+                nativeBridge.setForceH265Only(forceH265OnlyActive)
                 nativeBridge.setCodecs(alac = true, aac = effectiveH265Enabled) // AAC supported via MediaCodec
-                Log.i(TAG, "Codec options: h265Enabled=$h265Enabled forceH265Only=$forceH265Only effectiveH265Enabled=$effectiveH265Enabled")
+                Log.i(TAG, "Codec options: h265Enabled=$h265Enabled forceH265Only=$forceH265Only h265DecoderAvailable=$h265DecoderAvailable effectiveH265Enabled=$effectiveH265Enabled")
 
                 // Apply custom PIN if enabled (overrides random PIN from init)
                 if (pinEnabled && pinCode.isNotEmpty()) {
@@ -239,26 +251,35 @@ class AirCastService : Service(), NativeCallbacks {
                 }
 
                 // ---- Resolution: adaptive or manual ----
-                val displaySize = if (adaptRes) {
+                val requestedDisplaySize = if (adaptRes) {
                     val ds = detectDeviceResolution()
-                    nativeBridge.setDisplaySize(ds.width, ds.height, ds.fps)
-                    Log.i(TAG, "Adaptive resolution: ${ds.width}x${ds.height}@${ds.fps}fps")
+                    Log.i(TAG, "Adaptive resolution requested: ${ds.width}x${ds.height}@${ds.fps}fps")
                     ds
                 } else {
                     val res = Constants.Resolution.fromKey(resKey)
                     if (res.width > 0 && res.height > 0) {
-                        // Manual resolution — NOT capped by device resolution.
-                        // Sender outputs at requested res; MediaCodec handles scaling.
-                        nativeBridge.setDisplaySize(res.width, res.height, res.fps)
-                        Log.i(TAG, "Fixed resolution: ${res.key} (${res.width}x${res.height}@${res.fps}fps)")
-                        DisplaySize(res.width, res.height, res.fps)
+                        Log.i(TAG, "Manual resolution requested: ${res.key} (${res.width}x${res.height}@${res.fps}fps)")
+                        NegotiatedDisplaySize(res.width, res.height, res.fps)
                     } else {
                         // Fallback: AUTO somehow stored in manual mode
                         val ds = detectDeviceResolution()
-                        nativeBridge.setDisplaySize(ds.width, ds.height, ds.fps)
                         Log.w(TAG, "AUTO resolution in manual mode — falling back to adaptive: ${ds.width}x${ds.height}@${ds.fps}fps")
                         ds
                     }
+                }
+                val displaySize = videoDecoder.constrainDisplaySize(requestedDisplaySize)
+                nativeBridge.setDisplaySize(displaySize.width, displaySize.height, displaySize.fps)
+                debugNegotiatedWidth = displaySize.width
+                debugNegotiatedHeight = displaySize.height
+                debugNegotiatedFps = displaySize.fps
+                if (displaySize != requestedDisplaySize) {
+                    Log.w(
+                        TAG,
+                        "Requested display ${requestedDisplaySize.width}x${requestedDisplaySize.height}@${requestedDisplaySize.fps} " +
+                            "was limited to decoder-safe ${displaySize.width}x${displaySize.height}@${displaySize.fps}"
+                    )
+                } else {
+                    Log.i(TAG, "Decoder-safe display: ${displaySize.width}x${displaySize.height}@${displaySize.fps}fps")
                 }
                 // Prime MediaCodec with the negotiated display size. Some AirPlay
                 // sessions deliver the first IDR before the native video-size
@@ -363,10 +384,7 @@ class AirCastService : Service(), NativeCallbacks {
 
     // ---- Phase 3: Adaptive resolution ----
 
-    /** Simple container for detected display dimensions. */
-    private data class DisplaySize(val width: Int, val height: Int, val fps: Int)
-
-    private fun detectDeviceResolution(): DisplaySize {
+    private fun detectDeviceResolution(): NegotiatedDisplaySize {
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -377,25 +395,15 @@ class AirCastService : Service(), NativeCallbacks {
             wm.defaultDisplay.getRealMetrics(metrics)
         }
 
-        var w = metrics.widthPixels
-        var h = metrics.heightPixels
-        Log.i(TAG, "Device resolution: ${w}x${h}")
-
-        // Ensure even dimensions (H.264/H.265 requirement)
-        w = w and 0x7FFFFFFE // clear LSB
-        h = h and 0x7FFFFFFE
-
-        // Cap at 4K for bandwidth/codec limits
-        if (w > 3840 || h > 2160) {
-            Log.w(TAG, "Resolution too high, capping to 3840x2160")
-            w = 3840
-            h = 2160
-        }
-
-        // Determine fps: 60 for resolutions up to ~2560x1600, 30 for higher
-        val fps = if (w * h <= 2560 * 1600) 60 else 30
-
-        return DisplaySize(w, h, fps)
+        val physicalWidth = metrics.widthPixels
+        val physicalHeight = metrics.heightPixels
+        val result = DisplaySizePolicy.fromPhysicalDisplay(physicalWidth, physicalHeight)
+        Log.i(
+            TAG,
+            "Device resolution: ${physicalWidth}x${physicalHeight}; " +
+                "negotiated: ${result.width}x${result.height}@${result.fps}fps"
+        )
+        return result
     }
 
     // ---- NativeCallbacks ----
@@ -493,6 +501,8 @@ class AirCastService : Service(), NativeCallbacks {
         updateNotification(getString(R.string.status_waiting))
         broadcastState()
     }
+
+    fun decoderDebugSnapshot(): VideoDecoder.DebugSnapshot = videoDecoder.debugSnapshot()
 
     override fun onConnectionReset(reason: Int) {
         Log.i(TAG, "Connection reset: reason=$reason")

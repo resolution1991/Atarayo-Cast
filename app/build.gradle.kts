@@ -25,8 +25,8 @@ android {
         applicationId = "com.atarayocast.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.4.0"
+        versionCode = 7
+        versionName = "0.7.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -93,6 +93,7 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
+    testImplementation("junit:junit:4.13.2")
 
     // DLNA is implemented with native UPnP stack (no external dependency)
     // SSDP multicast + SOAP over HTTP are handled directly via Android APIs

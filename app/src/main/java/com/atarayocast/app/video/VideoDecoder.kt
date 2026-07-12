@@ -4,14 +4,19 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.util.Log
 import android.view.Surface
 import com.atarayocast.app.bridge.NativeBridge
+import com.atarayocast.app.service.DisplaySizePolicy
+import com.atarayocast.app.service.NegotiatedDisplaySize
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.floor
+import kotlin.math.min
 
 /**
  * Hardware-accelerated H.264 / H.265 video decoder using MediaCodec async callback mode.
@@ -37,10 +42,13 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
 
     companion object {
         private const val TAG = "VideoDecoder"
+        const val MIME_AVC = "video/avc"
+        const val MIME_HEVC = "video/hevc"
         private const val MAX_FRAME_SIZE = 6 * 1024 * 1024  // 6 MB
         private const val VERBOSE = false
         private const val STARTUP_OUTPUT_DROP_COUNT = 2
         private const val MAX_PENDING_FRAMES = 8
+        private const val SYNC_DEQUEUE_TIMEOUT_US = 10_000L
     }
 
     // ---- Threading ----
@@ -55,8 +63,8 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
     private var currentMime: String? = null
     private var currentWidth = 0
     private var currentHeight = 0
-    private var codecConfigured = false
-    private var waitingForKeyFrame = true
+    @Volatile private var codecConfigured = false
+    @Volatile private var waitingForKeyFrame = true
     private var startupOutputDropRemaining = 0
 
     // ---- Pending frames in decode order ----
@@ -69,6 +77,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
 
     private val pendingFrames = ArrayDeque<PendingFrame>()
     private var pendingFrameBytes = 0
+    @Volatile private var pendingFrameCount = 0
 
     // ---- Available input buffer indices (saved when no frame is pending) ----
     // CRITICAL: In async mode, MediaCodec calls onInputBufferAvailable for each
@@ -76,14 +85,46 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
     // and the callback won't fire again. So we save the index and use it when
     // a frame becomes available.
     private val availableInputIndices = ArrayDeque<Int>()
+    @Volatile private var availableInputCount = 0
 
     // ---- Stats ----
-    private var feedCount = 0
-    private var outputCount = 0
-    private var dropCount = 0
+    @Volatile private var feedCount = 0
+    @Volatile private var outputCount = 0
+    @Volatile private var dropCount = 0
+    @Volatile private var inputCallbackCount = 0
+    @Volatile private var synchronousCodec = false
+    @Volatile private var decoderName = "-"
+    @Volatile private var lastDecoderError = "-"
+    @Volatile private var lastInputSize = 0
+    @Volatile private var lastFeedAtMs = 0L
+    @Volatile private var lastRenderAtMs = 0L
 
     private val released = AtomicBoolean(false)
     val isReleased: Boolean get() = released.get()
+
+    private data class DecoderSelection(
+        val info: MediaCodecInfo,
+        val capabilities: MediaCodecInfo.CodecCapabilities
+    )
+
+    data class DebugSnapshot(
+        val codecName: String,
+        val mode: String,
+        val configured: Boolean,
+        val surfaceAttached: Boolean,
+        val fedFrames: Int,
+        val renderedFrames: Int,
+        val droppedFrames: Int,
+        val pendingFrames: Int,
+        val availableInputs: Int,
+        val inputCallbacks: Int,
+        val waitingForKeyFrame: Boolean,
+        val lastInputBytes: Int,
+        val millisSinceFeed: Long?,
+        val millisSinceRender: Long?,
+        val renderPath: String,
+        val lastError: String
+    )
 
     // ---- Public API ----
 
@@ -177,6 +218,88 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         }
     }
 
+    fun debugSnapshot(): DebugSnapshot = DebugSnapshot(
+        codecName = decoderName,
+        mode = if (synchronousCodec) "同步轮询" else "异步回调",
+        configured = codecConfigured,
+        surfaceAttached = surface?.isValid == true,
+        fedFrames = feedCount,
+        renderedFrames = outputCount,
+        droppedFrames = dropCount,
+        pendingFrames = pendingFrameCount,
+        availableInputs = availableInputCount,
+        inputCallbacks = inputCallbackCount,
+        waitingForKeyFrame = waitingForKeyFrame,
+        lastInputBytes = lastInputSize,
+        millisSinceFeed = lastFeedAtMs.takeIf { it > 0 }?.let { System.currentTimeMillis() - it },
+        millisSinceRender = lastRenderAtMs.takeIf { it > 0 }?.let { System.currentTimeMillis() - it },
+        renderPath = "定时渲染（系统单调时钟）",
+        lastError = lastDecoderError
+    )
+
+    /**
+     * Prevents the AirPlay server from advertising a stream size that the
+     * selected H.264 decoder cannot configure. This matters on older devices:
+     * a sender can report a successful connection before MediaCodec rejects an
+     * oversized stream, which otherwise looks like a black-screen session.
+     */
+    internal fun constrainDisplaySize(requested: NegotiatedDisplaySize): NegotiatedDisplaySize {
+        val selection = findDecoder(MIME_AVC) ?: run {
+            Log.w(TAG, "No AVC decoder capabilities available; keeping requested ${requested.width}x${requested.height}")
+            return requested
+        }
+        val isLegacyImgDecoder =
+            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                selection.info.name.contains("MSVDX", ignoreCase = true)
+        if (isLegacyImgDecoder) {
+            val constrained = DisplaySizePolicy.legacyDecoderSafe(requested)
+            if (constrained != requested) {
+                Log.w(
+                    TAG,
+                    "Legacy IMG decoder ${selection.info.name} limits ${requested.width}x${requested.height}@${requested.fps} " +
+                        "to ${constrained.width}x${constrained.height}@${constrained.fps} for sustained mirroring"
+                )
+            }
+            return constrained
+        }
+
+        val videoCapabilities = selection.capabilities.videoCapabilities ?: return requested
+
+        if (videoCapabilities.isSizeSupported(requested.width, requested.height)) {
+            return capFrameRate(requested, videoCapabilities)
+        }
+
+        var candidate = DisplaySizePolicy.fitWithin(
+            requested,
+            videoCapabilities.supportedWidths.upper,
+            videoCapabilities.supportedHeights.upper
+        )
+        repeat(24) {
+            if (videoCapabilities.isSizeSupported(candidate.width, candidate.height)) {
+                val constrained = capFrameRate(candidate, videoCapabilities)
+                Log.w(
+                    TAG,
+                    "AVC decoder ${selection.info.name} limits ${requested.width}x${requested.height}@${requested.fps} " +
+                        "to ${constrained.width}x${constrained.height}@${constrained.fps}"
+                )
+                return constrained
+            }
+            candidate = candidate.copy(
+                width = evenFloor(candidate.width * 0.95),
+                height = evenFloor(candidate.height * 0.95)
+            )
+        }
+
+        // A valid decoder was found but did not report a compatible size. Use
+        // the physical-safe 1080p fallback instead of advertising an unusable
+        // high-resolution stream and leaving the sender in a false-success state.
+        val fallback = NegotiatedDisplaySize(1280, 720, 30)
+        Log.w(TAG, "AVC decoder ${selection.info.name} has no compatible reported size; falling back to $fallback")
+        return fallback
+    }
+
+    fun supportsMime(mime: String): Boolean = findDecoder(mime) != null
+
     fun stop() {
         handler.post {
             releaseCodec()
@@ -202,6 +325,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         handler.postAtFrontOfQueue {
             dropPendingFrames()
             availableInputIndices.clear()
+            availableInputCount = 0
             waitingForKeyFrame = true
             startupOutputDropRemaining = STARTUP_OUTPUT_DROP_COUNT
             try {
@@ -232,7 +356,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
     // ---- Internal: Frame processing ----
 
     private fun handleFrame(data: ByteBuffer, isH265: Boolean, ntpTime: Long) {
-        val mime = if (isH265) "video/hevc" else "video/avc"
+        val mime = if (isH265) MIME_HEVC else MIME_AVC
         val size = data.limit()
 
         if (!startsWithNalStartCode(data, size)) {
@@ -339,6 +463,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
 
         pendingFrames.addLast(PendingFrame(data, size, pts, isKeyFrame))
         pendingFrameBytes += size
+        pendingFrameCount = pendingFrames.size
         return true
     }
 
@@ -350,8 +475,26 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
     private fun tryFeedPendingFrames() {
         val c = codec ?: return
 
+        if (synchronousCodec) {
+            while (pendingFrames.isNotEmpty()) {
+                val index = try {
+                    c.dequeueInputBuffer(SYNC_DEQUEUE_TIMEOUT_US)
+                } catch (e: Exception) {
+                    lastDecoderError = "dequeue input: ${e.message}"
+                    Log.e(TAG, "Failed to dequeue legacy decoder input", e)
+                    break
+                }
+                if (index < 0) break
+                feedFrameToCodec(c, index)
+                drainSynchronousOutput(c)
+            }
+            drainSynchronousOutput(c)
+            return
+        }
+
         while (availableInputIndices.isNotEmpty() && pendingFrames.isNotEmpty()) {
             val index = availableInputIndices.removeFirst()
+            availableInputCount = availableInputIndices.size
             feedFrameToCodec(c, index)
         }
     }
@@ -369,6 +512,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         val frame = pendingFrames.removeFirst()
 
         pendingFrameBytes -= frame.size
+        pendingFrameCount = pendingFrames.size
 
         try {
             val inputBuf = c.getInputBuffer(index)
@@ -390,12 +534,15 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             val flags = if (frame.isKeyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
             c.queueInputBuffer(index, 0, frame.size, frame.pts, flags)
             feedCount++
+            lastInputSize = frame.size
+            lastFeedAtMs = System.currentTimeMillis()
 
             if (VERBOSE && (feedCount % 30 == 0 || frame.isKeyFrame)) {
                 Log.i(TAG, "Fed frame #$feedCount to codec (size=${frame.size}, isIDR=${frame.isKeyFrame}" +
                     ", availSlots=${availableInputIndices.size}, queued=${pendingFrames.size})")
             }
         } catch (e: Exception) {
+            lastDecoderError = "queue input: ${e.message}"
             Log.e(TAG, "Error feeding frame to codec", e)
             waitingForKeyFrame = true
             startupOutputDropRemaining = 0
@@ -411,6 +558,19 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         try {
             releaseCodec()
 
+            val selection = findDecoder(mime)
+            if (selection == null) {
+                lastDecoderError = "没有 $mime 解码器"
+                Log.e(TAG, "No decoder available for $mime")
+                return false
+            }
+            val videoCapabilities = selection.capabilities.videoCapabilities
+            if (videoCapabilities != null && !videoCapabilities.isSizeSupported(width, height)) {
+                lastDecoderError = "不支持 ${width}x${height}"
+                Log.e(TAG, "Decoder ${selection.info.name} does not support $mime ${width}x${height}")
+                return false
+            }
+
             val format = MediaFormat.createVideoFormat(mime, width, height)
             val csd = extractCsdOptimized(csdBuffer, mime)
             if (csd != null) {
@@ -424,13 +584,13 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_FRAME_SIZE)
 
             // ---- Phase A optimization: Decoder scheduling hints ----
-            // KEY_PRIORITY=0 (realtime): tells the decoder this is a live stream,
-            //   prioritize low-latency scheduling over throughput.
-            // KEY_OPERATING_RATE=120: hints target frame rate × 2 headroom so the
-            //   decoder can allocate internal pipeline resources aggressively.
-            // KEY_FRAME_RATE=60: expected input frame rate for scheduling.
+            // KEY_PRIORITY=0 (realtime) prioritizes a live stream. Legacy
+            // Android 8 decoders are less tolerant of an aggressive 120fps
+            // operating-rate hint, so retain it only on newer platform stacks.
             format.setInteger(MediaFormat.KEY_PRIORITY, 0)
-            format.setInteger(MediaFormat.KEY_OPERATING_RATE, 120)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                format.setInteger(MediaFormat.KEY_OPERATING_RATE, 120)
+            }
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 60)
 
             // ---- Phase A optimization: Color metadata ----
@@ -443,31 +603,31 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
 
             // ---- Phase A optimization: Adaptive playback ----
-            // KEY_MAX_WIDTH/HEIGHT enables adaptive playback: the codec handles
-            // resolution changes (via SPS in the bitstream) without needing to be
-            // released and recreated. Most modern devices support this feature.
-            format.setInteger(MediaFormat.KEY_MAX_WIDTH, 3840)
-            format.setInteger(MediaFormat.KEY_MAX_HEIGHT, 2160)
-
             // ---- Low latency (API 30+) ----
             if (android.os.Build.VERSION.SDK_INT >= 30) {
                 format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             }
 
-            // Check adaptive playback support via MediaCodecList (API 21+)
-            val adaptiveSupported = try {
-                val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-                codecList.codecInfos.any { info ->
-                    !info.isEncoder && try {
-                        info.getCapabilitiesForType(mime)
-                            .isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_AdaptivePlayback)
-                    } catch (e: Exception) { false }
-                }
-            } catch (e: Exception) { false }
+            val adaptiveSupported = selection.capabilities.isFeatureSupported(
+                MediaCodecInfo.CodecCapabilities.FEATURE_AdaptivePlayback
+            )
+            if (adaptiveSupported) {
+                // Do not force an unsupported 4K envelope on a legacy decoder.
+                format.setInteger(MediaFormat.KEY_MAX_WIDTH, width)
+                format.setInteger(MediaFormat.KEY_MAX_HEIGHT, height)
+            }
             if (VERBOSE) Log.i(TAG, "Adaptive playback supported: $adaptiveSupported")
 
-            val newCodec = MediaCodec.createDecoderByType(mime)
-            newCodec.setCallback(DecoderCallback(), handler)
+            val newCodec = MediaCodec.createByCodecName(selection.info.name)
+            // Several Android 8/9 OMX stacks create the codec successfully but
+            // never issue async input callbacks. In that state received AirPlay
+            // frames pile up without a single buffer reaching the decoder,
+            // producing a connected-but-black session. Keep modern devices on
+            // callbacks; use serialized synchronous polling on legacy stacks.
+            synchronousCodec = Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+            if (!synchronousCodec) {
+                newCodec.setCallback(DecoderCallback(), handler)
+            }
             newCodec.configure(format, surface, null, 0)
             newCodec.start()
 
@@ -479,16 +639,57 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             feedCount = 0
             outputCount = 0
             dropCount = 0
+            inputCallbackCount = 0
+            lastInputSize = 0
+            lastFeedAtMs = 0L
+            lastRenderAtMs = 0L
             availableInputIndices.clear()
-            Log.i(TAG, "Codec configured (async): $mime ${width}x${height} surface=${surface != null}" +
+            availableInputCount = 0
+            decoderName = selection.info.name
+            lastDecoderError = "-"
+            Log.i(TAG, "Codec configured (${if (synchronousCodec) "sync" else "async"}): ${selection.info.name} $mime ${width}x${height} surface=${surface != null}" +
                 " color=BT.709/limited priority=realtime adaptive=$adaptiveSupported")
             return true
         } catch (e: Exception) {
+            lastDecoderError = "配置失败: ${e.message}"
             Log.e(TAG, "Failed to configure codec", e)
             codecConfigured = false
             return false
         }
     }
+
+    private fun findDecoder(mime: String): DecoderSelection? {
+        return try {
+            val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+                .asSequence()
+                .filter { !it.isEncoder && it.supportedTypes.any { type -> type.equals(mime, true) } }
+                .sortedBy { info ->
+                    when {
+                        info.name.startsWith("OMX.google.") -> 2
+                        info.name.startsWith("c2.android.") -> 2
+                        else -> 0
+                    }
+                }
+            candidates.firstNotNullOfOrNull { info ->
+                runCatching { DecoderSelection(info, info.getCapabilitiesForType(mime)) }.getOrNull()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to query decoder capabilities for $mime", e)
+            null
+        }
+    }
+
+    private fun capFrameRate(
+        size: NegotiatedDisplaySize,
+        capabilities: MediaCodecInfo.VideoCapabilities
+    ): NegotiatedDisplaySize {
+        val maximum = runCatching {
+            floor(capabilities.getSupportedFrameRatesFor(size.width, size.height).upper).toInt()
+        }.getOrDefault(size.fps)
+        return size.copy(fps = min(size.fps, maximum.coerceAtLeast(1)))
+    }
+
+    private fun evenFloor(value: Double): Int = floor(value).toInt().coerceAtLeast(2) and -2
 
     /**
      * Async MediaCodec callback — fires on our HandlerThread for serialized access.
@@ -499,6 +700,8 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             // CRITICAL FIX: Save the index even if no frame is pending.
             // When a frame arrives later, it will use this saved index.
             availableInputIndices.addLast(index)
+            availableInputCount = availableInputIndices.size
+            inputCallbackCount++
             tryFeedPendingFrames()
             if (VERBOSE) {
                 Log.d(
@@ -513,52 +716,74 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             index: Int,
             info: MediaCodec.BufferInfo
         ) {
-            // If surface was detached (Activity navigated away), release
-            // without rendering — the codec stays alive for later reattachment.
-            if (surface == null) {
-                codec.releaseOutputBuffer(index, false)
-                return
-            }
-
-            try {
-                if (startupOutputDropRemaining > 0) {
-                    codec.releaseOutputBuffer(index, false)
-                    startupOutputDropRemaining--
-                    if (VERBOSE) {
-                        Log.i(TAG, "Suppressed startup output frame, remaining=$startupOutputDropRemaining")
-                    }
-                    return
-                }
-
-                // Phase A optimization: use timestamp API (API 21+) instead of
-                // boolean render flag. Passing 0L renders immediately (same as
-                // render=true), but uses the timestamp code path which is
-                // required for future PTS-based frame pacing.
-                codec.releaseOutputBuffer(index, 0L)
-                outputCount++
-            } catch (e: Exception) {
-                // Surface might have been destroyed asynchronously —
-                // release without rendering to avoid crash.
-                Log.w(TAG, "Render failed (surface destroyed?), releasing without render")
-                try { codec.releaseOutputBuffer(index, false) } catch (_: Exception) {}
-            }
-
-            if (VERBOSE && outputCount % 30 == 0) {
-                Log.i(TAG, "Rendered frame #$outputCount (pts=${info.presentationTimeUs})")
-            }
+            renderOutputBuffer(codec, index, info)
         }
 
         override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
+            lastDecoderError = "解码器错误: ${e.message}"
             Log.e(TAG, "Codec error: ${e.message}", e)
             codecConfigured = false
             dropPendingFrames()
             availableInputIndices.clear()
+            availableInputCount = 0
             waitingForKeyFrame = true
             startupOutputDropRemaining = 0
         }
 
         override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
             Log.i(TAG, "Output format changed: $format")
+        }
+    }
+
+    private fun drainSynchronousOutput(c: MediaCodec) {
+        val info = MediaCodec.BufferInfo()
+        while (true) {
+            val index = try {
+                c.dequeueOutputBuffer(info, 0)
+            } catch (e: Exception) {
+                lastDecoderError = "dequeue output: ${e.message}"
+                Log.e(TAG, "Failed to dequeue legacy decoder output", e)
+                return
+            }
+            when {
+                index >= 0 -> renderOutputBuffer(c, index, info)
+                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
+                    Log.i(TAG, "Output format changed: ${c.outputFormat}")
+                else -> return
+            }
+        }
+    }
+
+    private fun renderOutputBuffer(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+        // If surface was detached (Activity navigated away), release without
+        // rendering; the codec stays alive for later reattachment.
+        if (surface == null) {
+            c.releaseOutputBuffer(index, false)
+            return
+        }
+
+        try {
+            if (startupOutputDropRemaining > 0) {
+                c.releaseOutputBuffer(index, false)
+                startupOutputDropRemaining--
+                return
+            }
+            // Huawei's Android 8 stagefright aborts natively when the boolean
+            // render overload is used with this IMG decoder. Passing 0L to the
+            // timestamp overload does not crash, but this vendor stack treats
+            // it as a stale presentation time and never latches the frame.
+            // Schedule against the required monotonic time base instead.
+            c.releaseOutputBuffer(index, System.nanoTime())
+            outputCount++
+            lastRenderAtMs = System.currentTimeMillis()
+        } catch (e: Exception) {
+            lastDecoderError = "渲染输出: ${e.message}"
+            Log.w(TAG, "Render failed (surface destroyed?), releasing without render")
+            try { c.releaseOutputBuffer(index, false) } catch (_: Exception) {}
+        }
+
+        if (VERBOSE && outputCount % 30 == 0) {
+            Log.i(TAG, "Rendered frame #$outputCount (pts=${info.presentationTimeUs})")
         }
     }
 
@@ -570,6 +795,7 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             nativeBridge.returnFrameBuffer(pendingFrames.removeFirst().data)
         }
         pendingFrameBytes = 0
+        pendingFrameCount = 0
     }
 
     // ---- IDR detection ----
@@ -802,6 +1028,8 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
         currentMime = null
         codecConfigured = false
         availableInputIndices.clear()
+        availableInputCount = 0
+        synchronousCodec = false
         waitingForKeyFrame = true
         startupOutputDropRemaining = 0
     }

@@ -8,17 +8,33 @@
     <string name="channel_desc">投屏服务运行通知</string>
 
     <!-- Main UI -->
-    <string name="status_idle">未连接</string>
-    <string name="status_waiting">等待连接…</string>
+    <string name="status_idle">服务已停止</string>
+    <string name="status_waiting">已就绪，等待投屏</string>
     <string name="status_connected">已连接</string>
     <string name="status_streaming">投屏中</string>
 
-    <string name="btn_start">启动服务</string>
-    <string name="btn_stop">停止服务</string>
-    <string name="btn_stop_casting">终止投屏</string>
+    <string name="main_brand_title">Atarayo Cast</string>
+    <string name="main_brand_subtitle">AirPlay · DLNA 接收端</string>
+    <string name="main_stopped_title">开始接收投屏</string>
+    <string name="main_stopped_desc">启动接收服务后，同一网络中的 Mac、iPhone、iPad 和安卓设备即可发现本机。</string>
+    <string name="main_waiting_title">接收服务已就绪</string>
+    <string name="main_waiting_desc">现在可在投屏设备中选择下方设备名称。应用退到后台后，接收服务仍会继续运行。</string>
+    <string name="main_device_card_label">在投屏列表中选择</string>
+    <string name="main_same_network_hint">请确保发送端与本机连接到同一局域网</string>
+    <string name="protocol_airplay">AirPlay</string>
+    <string name="protocol_dlna">DLNA</string>
+    <string name="btn_start">启动接收服务</string>
+    <string name="btn_stop">停止接收服务</string>
+    <string name="btn_stop_casting">结束投屏</string>
     <string name="btn_settings">设置</string>
     <string name="btn_refresh">刷新画面</string>
-    <string name="no_input">当前无投屏输入</string>
+    <string name="btn_back">返回</string>
+    <string name="media_airplay_title">AirPlay 屏幕镜像</string>
+    <string name="media_dlna_title">DLNA 媒体播放</string>
+    <string name="media_connected_subtitle">正在接收投屏内容</string>
+    <string name="service_started_message">接收服务已启动</string>
+    <string name="service_stopped_message">接收服务已停止</string>
+    <string name="notification_permission_denied_message">未开启通知权限，接收服务仍会运行</string>
 
     <string name="device_name_label">设备名称</string>
     <string name="device_name_default">Atarayo-Cast-Android</string>
@@ -29,26 +45,46 @@
 
     <!-- Settings -->
     <string name="settings_title">设置</string>
+    <string name="settings_subtitle">按你的设备与网络环境调整接收体验</string>
+    <string name="settings_section_receiver">接收设备</string>
+    <string name="settings_section_quality">画质与兼容性</string>
+    <string name="settings_section_playback">播放体验</string>
+    <string name="settings_section_security">安全与系统</string>
+    <string name="settings_section_developer">开发者选项</string>
     <string name="settings_resolution">分辨率</string>
-    <string name="settings_service_running_hint">部分设置在服务进行中无法更改，请停止服务后再调整。</string>
+    <string name="settings_resolution_desc">关闭自适应后可手动选择输出规格</string>
+    <string name="settings_service_running_title">接收服务正在运行</string>
+    <string name="settings_service_running_hint">设备名称、编码和接收参数需停止服务后修改；显示偏好仍可随时调整。</string>
+    <string name="settings_stop_to_edit">停止服务并编辑</string>
+    <string name="settings_service_stopped_ready">服务已停止，现在可以修改全部设置</string>
     <string name="settings_resolution_auto">自动 (自适应屏幕)</string>
     <string name="settings_resolution_720p">720p</string>
     <string name="settings_resolution_1080p">1080p</string>
     <string name="settings_resolution_1080p60">1080p 60fps</string>
     <string name="settings_resolution_4k">4K (HEVC)</string>
-    <string name="settings_adaptive_resolution">自适应分辨率</string>
+    <string name="settings_adaptive_resolution">自动匹配本机屏幕</string>
+    <string name="settings_adaptive_resolution_desc">优先使用适合当前屏幕的分辨率与刷新率</string>
     <string name="settings_keep_screen_on">防息屏</string>
     <string name="settings_keep_screen_on_desc">投屏时保持屏幕常亮</string>
-    <string name="settings_fullscreen_default">默认全屏</string>
-    <string name="settings_fullscreen_default_desc">服务启动后自动进入全屏</string>
+    <string name="settings_fullscreen_default">投屏时自动全屏</string>
+    <string name="settings_fullscreen_default_desc">收到画面后自动隐藏系统栏；返回键可退出全屏</string>
     <string name="settings_pin">PIN 认证</string>
+    <string name="settings_pin_desc">连接前要求发送端输入 4 位验证码</string>
     <string name="settings_boot">开机自启</string>
+    <string name="settings_boot_desc">设备启动后自动开启接收服务</string>
     <string name="settings_pip">画中画</string>
+    <string name="settings_pip_desc">投屏时离开应用，继续以小窗播放</string>
     <string name="settings_debug">调试信息</string>
+    <string name="settings_debug_desc">在画面上显示帧率、码率和编码信息</string>
     <string name="settings_h265">H.265/HEVC</string>
-    <string name="settings_h265_desc">启用 HEVC 编码支持 (4K 投屏)</string>
-    <string name="settings_force_h265">强行使用 H.265 编码</string>
-    <string name="settings_force_h265_desc">实验：拒绝 H.264 投屏；部分 Mac/iPhone/iPad 可能无法连接</string>
+    <string name="settings_h265_desc">允许 HEVC 与 4K 投屏；兼容设备建议开启</string>
+    <string name="settings_force_h265">仅接受 H.265</string>
+    <string name="settings_force_h265_desc">实验功能：会拒绝 H.264，部分设备可能无法连接</string>
+    <string name="dialog_device_name_hint">例如：客厅电视</string>
+    <string name="dialog_pin_title">设置 4 位 PIN</string>
+    <string name="dialog_pin_message">发送端连接时需要输入此验证码。</string>
+    <string name="dialog_pin_hint">4 位数字</string>
+    <string name="dialog_pin_error">请输入完整的 4 位数字</string>
 
     <!-- Debug -->
     <string name="debug_fps">FPS: %1$d</string>

@@ -8,10 +8,56 @@
 - 本地源码目录：`/Users/algernon/Documents/Cast-App`
 - 迁移记录：2026-07-05 已将原 `/Users/algernon/Documents/AirCast` 的源码、Git 历史、标签和 `origin` 远端迁入本 Codex 项目目录；后续以 `Cast-App` 作为默认工作目录。
 - 当前分支：`main`
-- 当前基线目标：`v0.4.0`（DLNA 可用性重构、接收端本地控制、新应用图标，发布到 GitHub）。
+- 当前发布目标：`v0.7.0`（UI/UX 重构、Android 8 解码兼容、TextureView 显示链路与宽屏首页适配，发布到 GitHub）。
 - v0.3 包含 Codex 修复：权限回调误启动、KeepScreenOn collector 累积、native 初始化失败处理、依赖路径配置、版本号对齐、设置页分辨率选中态、AirPlay 启动阶段块状伪影、持续投屏参考帧丢失重同步、AirPlay `maxFPS` 60fps 协商。
 - 版本定位：Android 设备作为 AirPlay 接收端和 DLNA Media Renderer。
 - 已确认构建产物：`/Users/algernon/Documents/Cast-App/app/build/outputs/apk/debug/app-debug.apk`
+
+## 当前未发布改动（2026-07-10 UI/UX 重构）
+
+- 主界面由“黑色视频底图 + 顶部工具栏 + 底部启停双按钮”重构为两态结构：未投屏时显示接收仪表盘，投屏时显示视频与统一媒体控制层。
+- 空闲态仅保留一个随服务状态切换的主按钮；刷新、全屏、结束投屏只在对应投屏场景出现，避免无效操作。
+- AirPlay 与 DLNA 使用统一控制语义；刷新画面仅对 AirPlay 显示，结束投屏根据当前协议调用 `disconnectClient()` 或 `terminateDlnaCasting()`。
+- 全屏统一使用 `WindowInsetsControllerCompat`，返回键在全屏投屏时优先退出全屏；修复自动全屏偏好失效和“启动服务即全屏”的错误语义。
+- `AirCastService.LocalBinder` 增加当前状态与协议读取，Activity 重新绑定时恢复真实界面状态。
+- 设置页新增 MaterialToolbar 返回导航、五类设置分组、整行点击、Material 输入框和 PIN 完整性校验。
+- 服务运行中新增“停止服务并编辑”路径，仅锁定设备名、分辨率、编码、PIN、防息屏等需服务重启的参数；自动全屏、PiP、开机自启和调试信息保持可改。
+- 拒绝通知权限不再阻断前台接收服务启动，会继续启动并通过 Snackbar 提示。
+- 视觉统一为 Material 3 深色体系、自定义矢量图标、至少 48dp 触控区域、edge-to-edge inset 与最大内容宽度。
+- 2026-07-10 已完成 debug APK 构建；模拟器验证冷启动、主/设置导航、权限拒绝、服务启停、运行中设置解锁、设备名对话框和 PIN 错误校验。期间发现的 `TextInputLayout` 参数类型崩溃已修复，清空 crash buffer 后未再出现新崩溃。
+- 待真机验证：真实 AirPlay / DLNA 投屏控制层、全屏/返回、结束投屏、PiP、横竖屏，以及 Lenovo YT-K606F 上的触控与系统栏表现。
+
+## 投屏稳定性待办（2026-07-11）
+
+- [ ] 连接真实 AirPlay 发送端和 Lenovo YT-K606F，采集“不出画面/闪退”的完整 Java、MediaCodec 与 native tombstone；当前无线调试地址拒绝连接，尚不能完成最终归因。
+- [ ] 真机覆盖 AirPlay H.264/H.265、镜像/视频、横竖屏、全屏/返回、后台恢复、PiP、刷新画面与断开重连。
+- [ ] 验证 Activity 进入后台时解除 Surface、返回前台重新绑定 MediaCodec 的行为，重点观察是否需要等待新 IDR 或触发解码器重建。
+- [ ] 验证“刷新画面”在 MediaCodec 持有 Surface 时调用 `lockCanvas()` 的设备兼容性；如复现 native window 冲突，改为解码器安全的清帧/重建流程。
+- [ ] 在可用真机上复测 16KB 页面环境下的 AirPlay native 链路；静态对齐通过不替代真实会话验证。
+
+## 2026-07-11 已知投屏问题修复
+
+- 自适应分辨率改为按长边 3840、短边 2160 的解码上限等比缩放，并保持设备原始横竖方向；1080x2400 不再被错误提升为 3840x2160。
+- AirPlay 主原生库与 OpenSSL 增加 16KB 最大页面尺寸链接参数，避免关键 ELF LOAD 段继续以 4KB 对齐构建。
+- 分辨率策略 5 项单元测试全部通过；覆盖 1080x2400 竖屏、2400x1080 横屏、2160x4096 超大竖屏、5120x1440 超宽屏和奇数尺寸偶数化。
+- 强制清理 native 缓存并重建 OpenSSL 后，ARM64 与 x86_64 APK 内的 `libaircast_native.so`、`libcrypto.so`、`libc++_shared.so`、`libdatastore_shared_counter.so` 均确认 `0x4000` ELF LOAD 对齐，APK 通过 `zipalign -c -P 16`。
+- 16KB 页面模拟器安装并启动成功，服务日志确认 `1080x2400 -> 1080x2400@60fps`，AirPlay 7000、DLNA 8090 和两项 mDNS 注册正常，crash buffer 为空。
+- 修复后执行本地 DLNA 端到端回归：SOAP `SetAVTransportURI` / `Play` 均返回 HTTP 200，1280x720 H.264/AAC 视频记录首帧渲染并持续播放，未出现新崩溃。
+
+### Huawei T5（Android 8）AirPlay 黑屏专项修复与回归状态
+
+- 已从真机日志确认黑屏根因：`OMX.IMG.MSVDX.Decoder.AVC` 可完成 `MediaCodec.configure()`，但异步模式下从不触发输入槽回调，造成“Mac 显示已连接、T5 零帧送入/零帧渲染、队列溢出”。
+- `VideoDecoder` 对 Android 8/9 改用同步 `dequeueInputBuffer()` / `dequeueOutputBuffer()` 路径；较新系统仍保持异步回调，避免改变现代设备的解码行为。
+- T5 的旧 IMG 解码器额外采用 `1280×800@30fps` 的稳定协商上限；真机启动日志已确认手动 `1920×1200@60fps` 被限制，并实际写入 native 的 `refreshRate=30`、`maxFPS=30`。
+- 调试覆盖层已增加协商尺寸、选中解码器/同步模式、送入/渲染/丢弃帧数、队列与输入槽、IDR 等待状态、最近输入帧字节数、送入与渲染间隔、Surface/配置状态及最后错误。
+- 2026-07-11 已重新构建并安装 debug APK；`DisplaySizePolicyTest` 共 7 项通过，T5 冷启动、服务启动、AirPlay 7000、DLNA 8090、mDNS、WakeLock 和兼容协商均已验证，无 crash 日志。
+- 第二轮实机证据（黑屏仍存在）：同步解码与协商策略均已生效，调试层显示 H.264 `1280×800@30`、已送 3629 / 已渲染 3626 / 丢弃 0，硬解驱动也累计报告 1347 帧已解码；因此根因从“没有喂入解码器”收敛到“已解码输出未真正合成到 Surface”。
+- 已否决的修复：`releaseOutputBuffer(index, true)` 在该机 Android 8 `libstagefright.so` 的 `MediaCodec::onReleaseOutputBuffer` 内稳定触发 native `SIGABRT`，连接后约 5 帧即导致整个应用进程退出，无法通过 Kotlin 异常处理捕获。
+- 当前修复：恢复时间戳输出接口，但将原先的无效 `0L` 改为 `System.nanoTime()` 单调时钟；旧 IMG 驱动可能把 `0L` 当作过期呈现时间而不合成，当前时钟可保持安全调用路径并让 SurfaceFlinger 正常接收帧。调试层标明 `输出：定时渲染（系统单调时钟）`。
+- 第三轮 SurfaceFlinger 证据：视频缓冲区已作为 vendor-tiled `format=0x300` 的独立硬件图层提交，activeBuffer、crop 与 HWC Device layer 均存在，但该层需要以 transform `0x4` 旋转后输出到竖向物理面板，最终仍为黑色；表明 T5 的旧 Mali/Huawei 硬件合成器无法正确处理这条直通旋转路径。
+- 同一会话中“刷新画面”的 `SurfaceHolder.lockCanvas()` 还多次与 MediaCodec 的 `API_MEDIA` 生产者争抢同一个 BufferQueue，系统明确记录 `already connected (cur=3 req=2)`；该按钮和 CPU Canvas 清屏逻辑已停用。
+- 当前修复：AirPlay 视频承载由 `SurfaceView` 改为 `TextureView`，让 MediaCodec 输出先通过 SurfaceTexture/GPU 与应用 UI 合成，再交给系统显示，从而绕过失败的 vendor-tiled 直通硬件图层旋转。首次部署发现 Android 8 不允许 TextureView 设置 background drawable，已移除该属性；最终版本冷启动、Texture Surface 创建、服务启动和 crash buffer 均验证正常。
+- [ ] 最后一项待确认：在 Mac 控制中心的“屏幕镜像”中重新选择 `T5`，持续镜像至少 30 秒；验收标准为调试层显示 `Surface: Valid (TextureView)`，且 Android 端有画面、不闪退、不再出现 `SurfaceView ... already connected`。当前自动化接口无法操作 macOS 控制中心的目标列表，需由本机用户完成该一次选择后继续采集真机日志。
 
 ## v0.3 后本地修复记录
 
@@ -121,7 +167,6 @@ cd /Users/algernon/Documents/Cast-App
 构建中存在但未阻断的警告：
 
 - Android SDK XML version 4 / parser supports up to 3 的 CMake 警告。
-- `MainActivity.kt` 使用已废弃的 `FLAG_FULLSCREEN`。
 - `AirCastService.kt` 使用已废弃的 `defaultDisplay/getRealMetrics` 分支。
 
 在 Codex 沙箱内直接构建会失败，错误为 Gradle daemon 本地 socket `Operation not permitted`。需要允许构建命令在沙箱外执行，或使用已授权的 `./build.sh`。
@@ -136,6 +181,16 @@ cd /Users/algernon/Documents/Cast-App
 ```bash
 adb -s 192.168.31.212:45523 logcat -s AirCastService MainActivity NativeBridge VideoDecoder AudioPlayer AirPlayRegistrar DlnaManager DLNA_SSDP DLNA_HTTP AirCastNative
 ```
+
+## 最低兼容设备基线（2026-07-11）
+
+- 测试设备：Huawei AGS2-AL00HN（设备名 `T5`），USB ADB 序列号 `FKFBB18C21151702`。
+- 系统与硬件：Android 8.0 / API 26、`arm64-v8a`、8 核 CPU（4×1.709GHz + 4×2.362GHz）、约 4GB 内存、1200×1920 @ 320dpi、Mali-T830 / OpenGL ES 3.2、4KB 内存页。
+- 安装验证：当前 debug APK `versionName=0.7.0`、`versionCode=7` 覆盖安装成功；冷启动与横屏首页验证正常，无 crash buffer 记录。
+- 服务验证：AirPlay 7000、DLNA 8090、mDNS 注册、WakeLock 和 native 帧池初始化均成功；该机保留了手动 `2560x1600@60fps` 设置，后续需补测清除数据后的默认自适应分辨率和 1080p 手动档。
+- DLNA 回归：本机 HTTP 测试媒体经 SOAP `SetAVTransportURI` / `Play` 均返回 HTTP 200；1280×720 H.264/AAC 视频在真机记录到首帧渲染、持续播放与播放进度，无闪退。
+- 性能快照：播放期总 PSS 约 121.8MB（Native Heap 13.2MB、Dalvik Heap 32.7MB）；10 秒稳态 UI 帧统计为 107 帧，90/95/99 分位 18/20/65ms。该统计包含控制层绘制，不等价于硬件视频 Surface 的实际帧率。
+- 待补测：真实 AirPlay 发送端的 H.264/H.265、音频、断开重连、横竖屏、全屏/返回、PiP；需要同一局域网内的 Mac、iPhone 或 iPad 发起真实会话并采集日志。
 
 ## 启动伪影修复策略
 
@@ -164,6 +219,12 @@ adb -s 192.168.31.212:45523 logcat -s AirCastService MainActivity NativeBridge V
 - 2026-07-05 交互调整：`终止投屏` 按钮不再使用独立隐藏计时器，改为监听 `PlayerView` controller visibility；Media3 播放控制 UI 显示时按钮同步显示，控制 UI 隐藏时按钮同步隐藏。
 - 仍需真机复测：小米系统本地媒体投屏的设备列表是否恢复、发起投屏后是否能正常播放、接收端触摸是否能呼出播放控件并控制进度。
 
+## 宽屏横屏首页适配（2026-07-12）
+
+- 现象：首页的 `dashboardScroll` 以前被直接限制为最大 `680dp` 宽。横屏宽屏设备上，其两侧会露出下方仍保持可见的 `TextureView` 视频层，表现为两条黑边。
+- 修复：滚动背景改为始终铺满父容器；新增内部约束容器，仅将 `dashboardContent` 限制为最大 `680dp` 并居中。这样保留了卡片和文字的舒适阅读宽度，同时背景完整覆盖横屏屏幕。
+- 真机验证：Huawei AGS2-AL00HN（T5，Android 8.0，1920×1200 横屏）覆盖安装后截图确认，首页背景连续显示、内容居中、无两侧黑边；首页仍可纵向轻微滚动访问底部“启动接收服务”操作。
+
 ## 功能边界
 
 当前 README 和 CHANGELOG 显示 v0.3 已覆盖：
@@ -184,7 +245,7 @@ adb -s 192.168.31.212:45523 logcat -s AirCastService MainActivity NativeBridge V
 1. 真机验证闭环：构建通过不等于投屏链路稳定，需要按 AirPlay、DLNA、音频、断开重连、后台/PiP 分场景验证。
 2. Android 兼容性：处理 deprecated API，尤其是显示尺寸、全屏沉浸、通知权限和后台启动限制。
 3. 日志与诊断：为 RAOP 连接、解码器重建、DLNA SOAP 错误和 mDNS 注册失败整理可复用排障命令。
-4. 发布配置：当前 debug/release 元数据已对齐到 `versionName = "0.4.0"`、`versionCode = 5`；后续每次 tag/release 仍需同步更新。
+4. 发布配置：当前 debug/release 元数据已对齐到 `versionName = "0.7.0"`、`versionCode = 7`；后续每次 tag/release 仍需同步更新。
 5. 依赖授权：项目因 UxPlay 使用 GPL-3.0，发布前需要确保 LICENSE、源码提供方式和第三方依赖声明完整。
 
 ## 常用命令
