@@ -57,7 +57,8 @@
 - 第三轮 SurfaceFlinger 证据：视频缓冲区已作为 vendor-tiled `format=0x300` 的独立硬件图层提交，activeBuffer、crop 与 HWC Device layer 均存在，但该层需要以 transform `0x4` 旋转后输出到竖向物理面板，最终仍为黑色；表明 T5 的旧 Mali/Huawei 硬件合成器无法正确处理这条直通旋转路径。
 - 同一会话中“刷新画面”的 `SurfaceHolder.lockCanvas()` 还多次与 MediaCodec 的 `API_MEDIA` 生产者争抢同一个 BufferQueue，系统明确记录 `already connected (cur=3 req=2)`；该按钮和 CPU Canvas 清屏逻辑已停用。
 - 当前修复：AirPlay 视频承载由 `SurfaceView` 改为 `TextureView`，让 MediaCodec 输出先通过 SurfaceTexture/GPU 与应用 UI 合成，再交给系统显示，从而绕过失败的 vendor-tiled 直通硬件图层旋转。首次部署发现 Android 8 不允许 TextureView 设置 background drawable，已移除该属性；最终版本冷启动、Texture Surface 创建、服务启动和 crash buffer 均验证正常。
-- [ ] 最后一项待确认：在 Mac 控制中心的“屏幕镜像”中重新选择 `T5`，持续镜像至少 30 秒；验收标准为调试层显示 `Surface: Valid (TextureView)`，且 Android 端有画面、不闪退、不再出现 `SurfaceView ... already connected`。当前自动化接口无法操作 macOS 控制中心的目标列表，需由本机用户完成该一次选择后继续采集真机日志。
+- [x] 最后一项已确认（2026-08-04 真机复测）：在 Mac 控制中心“屏幕镜像”中选择 `T5` 持续镜像约 30 秒，**T5 端画面正常显示**，无闪退、无 `SurfaceView ... already connected`。logcat 证实 `Codec configured (sync): OMX.IMG.MSVDX.Decoder.AVC 1280x800 surface=true`，硬件解码器累计 `#Total number of Frames Decoded: 1076`、稳定 ~30fps；会话由用户主动停止（`Video reset, reason=1`），teardown 时 `MediaCodec.flush()` 抛出已被捕获的 `IllegalStateException`（W 级，doing full reset），进程未退出。SurfaceView->TextureView 修复验收通过。
+- T5 分辨率调查结论（DIAGNOSTIC-A，2026-08-04）：服务启动时打印 `DECODER_CAPS name=OMX.IMG.MSVDX.Decoder.AVC widthRange=96..4096 heightRange=16..2160 sizeSupport[1920×1200=true, 2560×1600=true, 3840×2160=true] maxFps@1920x1200=109.2 maxFps@1280x800=245.8`。即解码器**自报支持 1920×1200（甚至 4K）**；当前 1280×800@30 上限来自 `DisplaySizePolicy.legacyDecoderSafe` 的经验保护（原因为异步回调不触发、`releaseOutputBuffer(true)` 触发 SIGABRT，二者已分别由“Android 8/9 改同步模式”和“改用 System.nanoTime() 时间戳”修复），并非解码器能力限制。后续可试验性上调上限到 1920×1200 验证。
 
 ## v0.3 后本地修复记录
 

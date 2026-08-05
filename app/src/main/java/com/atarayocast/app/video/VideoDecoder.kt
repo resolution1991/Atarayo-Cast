@@ -248,21 +248,47 @@ class VideoDecoder(private val nativeBridge: NativeBridge) {
             Log.w(TAG, "No AVC decoder capabilities available; keeping requested ${requested.width}x${requested.height}")
             return requested
         }
-        val isLegacyImgDecoder =
-            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-                selection.info.name.contains("MSVDX", ignoreCase = true)
-        if (isLegacyImgDecoder) {
-            val constrained = DisplaySizePolicy.legacyDecoderSafe(requested)
-            if (constrained != requested) {
-                Log.w(
-                    TAG,
-                    "Legacy IMG decoder ${selection.info.name} limits ${requested.width}x${requested.height}@${requested.fps} " +
-                        "to ${constrained.width}x${constrained.height}@${constrained.fps} for sustained mirroring"
+        // [DIAGNOSTIC-A] Log the selected AVC decoder's reported capabilities so we can
+        // tell whether a legacy IMG decoder truly cannot reach native resolution, or is
+        // only being held back by the legacy safe-envelope cap. Read-only; runs once per
+        // service start. Safe to remove after the T5 resolution investigation.
+        runCatching {
+            val vc = selection.capabilities.videoCapabilities
+            if (vc != null) {
+                val sw = vc.supportedWidths
+                val sh = vc.supportedHeights
+                val sizes = listOf(
+                    1920 to 1200, 1920 to 1080, 2560 to 1600,
+                    1280 to 800, 1280 to 720, 3840 to 2160
                 )
+                val sizeReport = sizes.joinToString(", ") { (w, h) ->
+                    "$w×$h=${vc.isSizeSupported(w, h)}"
+                }
+                val fps1920 = runCatching { vc.getSupportedFrameRatesFor(1920, 1200).upper }
+                    .getOrDefault(Double.NaN)
+                val fps1280 = runCatching { vc.getSupportedFrameRatesFor(1280, 800).upper }
+                    .getOrDefault(Double.NaN)
+                Log.i(
+                    TAG,
+                    "DECODER_CAPS name=${selection.info.name} " +
+                        "widthRange=${sw.lower}..${sw.upper} " +
+                        "heightRange=${sh.lower}..${sh.upper} " +
+                        "sizeSupport[$sizeReport] " +
+                        "maxFps@1920x1200=$fps1920 maxFps@1280x800=$fps1280"
+                )
+            } else {
+                Log.i(TAG, "DECODER_CAPS name=${selection.info.name} videoCapabilities=null")
             }
-            return constrained
         }
-
+        // Legacy IMG (MSVDX) decoders previously had a hardcoded 1280x800@30 safe
+        // envelope here: their reported caps were more optimistic than sustained
+        // throughput, and the Android 8 OMX stack crashed on releaseOutputBuffer(true).
+        // Both root causes are now fixed (sync polling on API <= P, and a
+        // System.nanoTime() render timestamp instead of 0L), and DECODER_CAPS has
+        // confirmed these decoders genuinely report supporting native/4K sizes. The
+        // hardcoded cap is removed so users can pick any preset and lower it
+        // themselves if a chosen size stutters; the capability path below still
+        // clamps fps to the decoder's reported max for the chosen size.
         val videoCapabilities = selection.capabilities.videoCapabilities ?: return requested
 
         if (videoCapabilities.isSizeSupported(requested.width, requested.height)) {

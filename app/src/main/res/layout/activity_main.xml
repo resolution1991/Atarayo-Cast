@@ -121,24 +121,6 @@
                     app:iconTint="@color/on_surface" />
             </LinearLayout>
 
-            <Space
-                android:layout_width="1dp"
-                android:layout_height="32dp" />
-
-            <FrameLayout
-                android:layout_width="88dp"
-                android:layout_height="88dp"
-                android:background="@drawable/bg_brand_icon"
-                android:padding="24dp">
-
-                <ImageView
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:contentDescription="@null"
-                    android:src="@drawable/ic_cast_24"
-                    app:tint="@color/on_primary" />
-            </FrameLayout>
-
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
